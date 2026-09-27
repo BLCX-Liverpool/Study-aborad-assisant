@@ -1,0 +1,60 @@
+{
+  "version": "0.1.0",
+  "description": "Study Abroad Assistant internal skill manifest.",
+  "skills": [
+    {
+      "name": "assignment-analysis",
+      "path": "assignment-analysis/SKILL.md",
+      "agent_module": "backend/app/agents/assignment",
+      "schema_module": "backend/app/schemas/assignment.py"
+    },
+    {
+      "name": "document-rag",
+      "path": "document-rag/SKILL.md",
+      "agent_module": "backend/app/rag",
+      "schema_module": "backend/app/rag/models.py"
+    },
+    {
+      "name": "task-planner",
+      "path": "task-planner/SKILL.md",
+      "agent_module": "backend/app/agents/planner",
+      "schema_module": "backend/app/schemas/planner.py"
+    },
+    {
+      "name": "email-drafting",
+      "path": "email-drafting/SKILL.md",
+      "agent_module": "backend/app/agents/email",
+      "schema_module": "backend/app/schemas/email.py"
+    },
+    {
+      "name": "travel-planning",
+      "path": "travel-planning/SKILL.md",
+      "agent_module": "backend/app/agents/travel",
+      "schema_module": "backend/app/schemas/travel.py"
+    },
+    {
+      "name": "finance-budgeting",
+      "path": "finance-budgeting/SKILL.md",
+      "agent_module": "backend/app/agents/finance",
+      "schema_module": "backend/app/schemas/finance.py"
+    },
+    {
+      "name": "wellbeing-support",
+      "path": "wellbeing-support/SKILL.md",
+      "agent_module": "backend/app/agents/wellbeing",
+      "schema_module": "backend/app/schemas/wellbeing.py"
+    },
+    {
+      "name": "fitness-planning",
+      "path": "fitness-planning/SKILL.md",
+      "agent_module": "backend/app/agents/fitness",
+      "schema_module": "backend/app/schemas/fitness.py"
+    },
+    {
+      "name": "social-content-writing",
+      "path": "social-content-writing/SKILL.md",
+      "agent_module": "backend/app/agents/social_content",
+      "schema_module": "backend/app/schemas/social_content.py"
+    }
+  ]
+}

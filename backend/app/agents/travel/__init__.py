@@ -1,0 +1,1 @@
+"""Simplified travel planning agent."""
