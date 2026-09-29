@@ -1,15 +1,33 @@
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from app.agents.planner.global_planner import GlobalPlanner
 from app.agents.planner.reminder_worker import ReminderWorker
 from app.agents.planner.service import TaskPlannerService
+from app.core.llm import ChatResponse
 from app.schemas.action import ActionItem
 from app.schemas.email import EmailSendResult
 from app.schemas.planner import DueReminder, EmailReminderQueueItem, EmailReminderSendRequest, GlobalPlanningRequest, ScheduleBlock
 
 
-def test_global_planner_converts_action_items_to_plan() -> None:
+class FakePlannerLlm:
+    def __init__(self, payload):
+        self.payload = payload
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        return ChatResponse(content=json.dumps(self.payload), model="fake-planner")
+
+
+def _planner_service(payload) -> TaskPlannerService:
+    return TaskPlannerService(global_planner=GlobalPlanner(FakePlannerLlm(payload)))
+
+
+@pytest.mark.asyncio
+async def test_global_planner_uses_llm_tot_candidates_to_plan() -> None:
     deadline = datetime(2026, 10, 10, 16, 0, tzinfo=UTC)
     request = GlobalPlanningRequest(
         user_id="user_1",
@@ -31,16 +49,127 @@ def test_global_planner_converts_action_items_to_plan() -> None:
             ),
         ],
     )
+    payload = {
+        "candidates": [
+            {
+                "strategy": "llm_deadline_safe",
+                "rationale": "Start early, split coursework, and prepare for travel.",
+                "tasks": [
+                    {
+                        "title": "Requirement review: COMP702 Assignment deadline",
+                        "description": "Read the brief and mark constraints.",
+                        "source_type": "assignment_deadline",
+                        "start_time": "2026-10-02T09:00:00Z",
+                        "deadline": "2026-10-10T16:00:00Z",
+                        "estimated_minutes": 90,
+                        "priority": "high",
+                        "evidence": [],
+                    },
+                    {
+                        "title": "Research and outline: COMP702 Assignment deadline",
+                        "description": "Collect sources and outline sections.",
+                        "source_type": "assignment_deadline",
+                        "start_time": "2026-10-04T09:00:00Z",
+                        "deadline": "2026-10-10T16:00:00Z",
+                        "estimated_minutes": 120,
+                        "priority": "high",
+                        "evidence": [],
+                    },
+                    {
+                        "title": "Draft: COMP702 Assignment deadline",
+                        "description": "Write the first full draft.",
+                        "source_type": "assignment_deadline",
+                        "start_time": "2026-10-07T09:00:00Z",
+                        "deadline": "2026-10-10T16:00:00Z",
+                        "estimated_minutes": 180,
+                        "priority": "high",
+                        "evidence": [],
+                    },
+                    {
+                        "title": "Review and submit: COMP702 Assignment deadline",
+                        "description": "Check rubric alignment and submit.",
+                        "source_type": "assignment_deadline",
+                        "start_time": "2026-10-09T09:00:00Z",
+                        "deadline": "2026-10-10T16:00:00Z",
+                        "estimated_minutes": 90,
+                        "priority": "urgent",
+                        "evidence": [],
+                    },
+                    {
+                        "title": "Prepare for Flight to London",
+                        "description": "Check route, documents, and timing.",
+                        "source_type": "travel_event",
+                        "start_time": "2026-10-09T18:00:00Z",
+                        "deadline": "2026-10-10T16:00:00Z",
+                        "estimated_minutes": 60,
+                        "priority": "high",
+                        "evidence": [],
+                    },
+                ],
+                "events": [
+                    {
+                        "title": "Flight to London",
+                        "description": None,
+                        "location": "Airport",
+                        "start_time": "2026-10-10T16:00:00Z",
+                        "end_time": "2026-10-10T18:00:00Z",
+                        "source_type": "travel_event",
+                        "evidence": [],
+                    }
+                ],
+                "assumptions": ["LLM chose an early-start candidate."],
+            },
+            {
+                "strategy": "llm_compact",
+                "rationale": "Compress work into fewer blocks.",
+                "tasks": [
+                    {
+                        "title": "Compact coursework block",
+                        "source_type": "assignment_deadline",
+                        "start_time": "2026-10-10T12:30:00Z",
+                        "deadline": "2026-10-10T16:00:00Z",
+                        "estimated_minutes": 180,
+                        "priority": "high",
+                        "evidence": [],
+                    }
+                ],
+                "events": [],
+                "assumptions": [],
+            },
+            {
+                "strategy": "llm_balanced",
+                "rationale": "Moderately spaced plan.",
+                "tasks": [
+                    {
+                        "title": "Balanced coursework block",
+                        "source_type": "assignment_deadline",
+                        "start_time": "2026-10-06T09:00:00Z",
+                        "deadline": "2026-10-10T16:00:00Z",
+                        "estimated_minutes": 120,
+                        "priority": "medium",
+                        "evidence": [],
+                    }
+                ],
+                "events": [],
+                "assumptions": [],
+            },
+        ]
+    }
 
-    plan = TaskPlannerService().plan_global(request)
+    plan = await _planner_service(payload).plan_global(request)
 
-    assert len(plan.tasks) == 2
+    assert len(plan.tasks) >= 4
     assert len(plan.events) == 1
     assert plan.reminders
-    assert plan.tasks[0].source_type == "assignment_deadline"
+    assert plan.selected_strategy == "llm_deadline_safe"
+    assert len(plan.planning_candidates) == 3
+    assert any(step.step == "select" for step in plan.thought_trace)
+    assert any(task.source_type == "assignment_deadline" for task in plan.tasks)
+    assert any("Review and submit" in task.title for task in plan.tasks)
 
 
-def test_global_planner_uses_memory_preferences_and_existing_blocks() -> None:
+@pytest.mark.asyncio
+async def test_global_planner_scores_llm_candidates_against_preferences_and_existing_blocks() -> None:
     deadline = datetime(2026, 10, 10, 16, 0, tzinfo=UTC)
     request = GlobalPlanningRequest(
         user_id="user_1",
@@ -63,11 +192,53 @@ def test_global_planner_uses_memory_preferences_and_existing_blocks() -> None:
         ],
         memory_preferences=["Prefers reminders at least 24 hours before bills."],
     )
+    payload = {
+        "candidates": [
+            {
+                "strategy": "llm_conflicting",
+                "rationale": "LLM candidate that conflicts with a shift.",
+                "tasks": [
+                    {
+                        "title": "Pay rent",
+                        "source_type": "bill_due",
+                        "start_time": "2026-10-10T14:00:00Z",
+                        "deadline": "2026-10-10T16:00:00Z",
+                        "estimated_minutes": 30,
+                        "priority": "high",
+                        "evidence": [],
+                    }
+                ],
+                "events": [],
+                "assumptions": [],
+            },
+            {
+                "strategy": "llm_preference_safe",
+                "rationale": "LLM candidate that respects the 24 hour bill preference.",
+                "tasks": [
+                    {
+                        "title": "Pay rent",
+                        "source_type": "bill_due",
+                        "start_time": "2026-10-09T09:00:00Z",
+                        "deadline": "2026-10-10T16:00:00Z",
+                        "estimated_minutes": 30,
+                        "priority": "high",
+                        "evidence": [],
+                    }
+                ],
+                "events": [],
+                "assumptions": ["Respects the user's reminder preference."],
+            },
+        ]
+    }
 
-    plan = TaskPlannerService().plan_global(request)
+    plan = await _planner_service(payload).plan_global(request)
 
-    assert plan.conflicts
+    assert plan.selected_strategy == "llm_preference_safe"
+    assert plan.conflicts == []
     assert any("memory preferences" in assumption.lower() for assumption in plan.assumptions)
+    assert plan.tasks[0].start_time is not None
+    assert deadline - plan.tasks[0].start_time >= timedelta(hours=24)
+    assert plan.planning_candidates
 
 
 @pytest.mark.asyncio

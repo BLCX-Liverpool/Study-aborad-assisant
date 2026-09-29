@@ -33,7 +33,7 @@ async def plan_global(
         request = request.model_copy(
             update={"existing_blocks": await PlannerRepository(session).list_schedule_blocks(request.user_id)}
         )
-    return TaskPlannerService().plan_global(request)
+    return await TaskPlannerService().plan_global(request)
 
 
 @router.post("/save/{user_id}", response_model=SavedPlannerOutput)

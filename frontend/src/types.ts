@@ -60,6 +60,37 @@ export type PlannerOutput = {
   }>;
   conflicts: string[];
   assumptions: string[];
+  selected_strategy?: string | null;
+  planning_candidates?: Array<{
+    strategy: string;
+    task_count: number;
+    event_count: number;
+    conflict_count: number;
+    score: {
+      conflict_penalty: number;
+      deadline_safety: number;
+      priority_alignment: number;
+      preference_alignment: number;
+      workload_balance: number;
+      evidence_alignment: number;
+      total: number;
+    };
+    assumptions: string[];
+  }>;
+  thought_trace?: Array<{
+    step: "generate" | "evaluate" | "select";
+    strategy: string;
+    rationale: string;
+    score?: {
+      conflict_penalty: number;
+      deadline_safety: number;
+      priority_alignment: number;
+      preference_alignment: number;
+      workload_balance: number;
+      evidence_alignment: number;
+      total: number;
+    } | null;
+  }>;
 };
 
 export type ActionItem = {
@@ -85,6 +116,32 @@ export type ResearchSource = {
   published_at?: string | null;
   evidence: EvidenceRef[];
   metadata: Record<string, unknown>;
+};
+
+export type ArxivSourceCandidates = {
+  status: "needs_user_selection" | string;
+  queries: string[];
+  sources: ResearchSource[];
+  assumptions: string[];
+};
+
+export type SelectedResearchSourceIndexResponse = {
+  user_id: string;
+  indexed_file_ids: string[];
+  results: Array<{
+    source: ResearchSource;
+    file_id: string;
+    local_path?: string | null;
+    status: "indexed" | "download_failed" | "index_failed" | "skipped";
+    error?: string | null;
+    index?: {
+      file_id: string;
+      chunk_count: number;
+      embedding_count: number;
+      status: string;
+    } | null;
+  }>;
+  assumptions: string[];
 };
 
 export type IdeaVerificationResponse = {
@@ -153,9 +210,80 @@ export type ChatApiResponse = {
     name: string;
     payload: Record<string, unknown>;
   }>;
+  latency_summary?: LatencyTraceSummary | null;
   memory_context?: Record<string, unknown> | null;
   missing_information: string[];
   next_actions: string[];
+};
+
+export type LatencyTraceSummary = {
+  trace_id: string;
+  total_duration_ms: number;
+  span_count: number;
+  failed_span_count: number;
+  by_type: Record<string, number>;
+  slowest_spans: Array<{
+    span_name: string;
+    span_type: string;
+    duration_ms: number;
+    status: "completed" | "failed";
+  }>;
+  persisted: boolean;
+};
+
+export type TraceSpanView = {
+  span_id: string;
+  trace_id: string;
+  parent_span_id?: string | null;
+  user_id?: string | null;
+  conversation_id?: string | null;
+  agent_run_id?: string | null;
+  span_name: string;
+  span_type: string;
+  status: string;
+  started_at: string;
+  completed_at: string;
+  duration_ms: number;
+  offset_ms: number;
+  depth: number;
+  input_json?: Record<string, unknown> | null;
+  output_json?: Record<string, unknown> | null;
+  error?: string | null;
+  metadata_json: Record<string, unknown>;
+};
+
+export type TraceWaterfallResponse = {
+  trace_id: string;
+  found: boolean;
+  summary?: LatencyTraceSummary | null;
+  spans: TraceSpanView[];
+};
+
+export type LongTermMemoryItem = {
+  id?: string | null;
+  namespace: string;
+  memory_type: string;
+  content: string;
+  score: number;
+  source_type?: string | null;
+  source_id?: string | null;
+  confidence?: number | null;
+  access_policy?: Record<string, unknown> | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type MemoryReviewResponse = {
+  user_id: string;
+  memories: LongTermMemoryItem[];
+  candidates: LongTermMemoryItem[];
+};
+
+export type MemoryDecisionResponse = {
+  status: string;
+  memory_ids: string[];
+  assumptions: string[];
+  error?: string | null;
 };
 
 export type MultiIntentExecutionPlan = {
@@ -164,7 +292,7 @@ export type MultiIntentExecutionPlan = {
     index: number;
     intent_name: string;
     agent_intent: string;
-    status: "planned" | "completed" | "needs_input" | "skipped" | "blocked";
+    status: "planned" | "completed" | "needs_input" | "skipped" | "blocked" | "failed";
     depends_on: number[];
     condition?: string | null;
     slots: Record<string, unknown>;
@@ -209,6 +337,15 @@ export type FitnessPlanOutput = {
     requires_confirmation: boolean;
     confirmed: boolean;
   }>;
+  memory_confirmation?: {
+    status: string;
+    candidate_count: number;
+    pending_memory_ids: string[];
+    confirmed_memory_ids: string[];
+    skipped: string[];
+    assumptions: string[];
+    error?: string | null;
+  } | null;
   missing_information: string[];
   risk_notes: string[];
   assumptions: string[];
@@ -246,6 +383,21 @@ export type SocialContentOutput = {
     status: string;
     boundary: string;
     expected_inputs: string[];
+  } | null;
+  memory_candidates: Array<{
+    namespace: string;
+    content: string;
+    requires_confirmation: boolean;
+    confirmed: boolean;
+  }>;
+  memory_confirmation?: {
+    status: string;
+    candidate_count: number;
+    pending_memory_ids: string[];
+    confirmed_memory_ids: string[];
+    skipped: string[];
+    assumptions: string[];
+    error?: string | null;
   } | null;
   assumptions: string[];
   disclaimer: string;

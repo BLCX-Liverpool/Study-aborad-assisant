@@ -12,6 +12,12 @@ export function TaskTimeline({ plan }: TaskTimelineProps) {
         <CalendarDays size={18} />
         <h2>Task Timeline</h2>
       </div>
+      {plan.selected_strategy && (
+        <div className="planner-strategy-row">
+          <span>{plan.selected_strategy.split("_").join(" ")}</span>
+          <span>{plan.planning_candidates?.length ?? 0} candidates evaluated</span>
+        </div>
+      )}
       <ol className="timeline">
         {plan.tasks.map((task) => (
           <li key={task.title}>
@@ -46,4 +52,3 @@ function formatRange(start?: string | null, end?: string | null) {
   if (end) return `Due ${formatter.format(new Date(end))}`;
   return "Unscheduled";
 }
-

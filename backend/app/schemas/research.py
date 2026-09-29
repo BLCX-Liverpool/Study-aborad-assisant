@@ -1,10 +1,13 @@
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.schemas.assignment import AssignmentAnalysis
+from app.schemas.assignment import AssignmentAnalysis, AssignmentQAResponse
 from app.schemas.common import EvidenceRef
+from app.rag.models import IndexDocumentResponse
 
 ResearchSourceType = Literal["arxiv", "web", "paper_pdf"]
 
@@ -83,12 +86,74 @@ class ResearchWorkflowResponse(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
 
 
+class ResearchSynthesisSource(BaseModel):
+    title: str
+    url: str | None = None
+    source_type: str | None = None
+    summary: str | None = None
+    evidence_count: int = 0
+
+
+class ResearchSynthesisReport(BaseModel):
+    status: Literal["supported", "partial", "insufficient_evidence"]
+    key_findings: list[str] = Field(default_factory=list)
+    evidence_gaps: list[str] = Field(default_factory=list)
+    selected_sources: list[ResearchSynthesisSource] = Field(default_factory=list)
+    writing_guidance: list[str] = Field(default_factory=list)
+
+
+class AssignmentResearchEvidenceReviewRequest(BaseModel):
+    user_id: str
+    assignment: AssignmentAnalysis
+    indexed_file_ids: list[str] | None = None
+    research_sources: list[ResearchSource] = Field(default_factory=list)
+    ideas: list[str] = Field(default_factory=list)
+    questions: list[str] = Field(default_factory=list)
+    max_questions: int = Field(default=5, ge=1, le=10)
+    min_score: float = Field(default=0.15, ge=0.0, le=1.0)
+    conversation_id: str | None = None
+    trace_id: str | None = None
+
+
+class AssignmentResearchEvidenceReviewResponse(BaseModel):
+    queries: list[str] = Field(default_factory=list)
+    qa_results: list[AssignmentQAResponse] = Field(default_factory=list)
+    idea_verification: IdeaVerificationResponse | None = None
+    synthesis: ResearchSynthesisReport
+    assumptions: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
+
+
 class ResearchSourceIndexRequest(BaseModel):
     user_id: str
     file_id: str
     source_path: Path
     source_name: str | None = None
     mime_type: str | None = "application/pdf"
+
+
+class SelectedResearchSourceIndexRequest(BaseModel):
+    user_id: str
+    sources: list[ResearchSource] = Field(default_factory=list)
+    conversation_id: str | None = None
+    trace_id: str | None = None
+
+
+class SelectedResearchSourceIndexResult(BaseModel):
+    source: ResearchSource
+    file_id: str
+    local_path: Path | None = None
+    download: PaperDownloadResponse | None = None
+    index: IndexDocumentResponse | None = None
+    status: Literal["indexed", "download_failed", "index_failed", "skipped"] = "indexed"
+    error: str | None = None
+
+
+class SelectedResearchSourceIndexResponse(BaseModel):
+    user_id: str
+    indexed_file_ids: list[str] = Field(default_factory=list)
+    results: list[SelectedResearchSourceIndexResult] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
 
 
 class IdeaVerificationRequest(BaseModel):

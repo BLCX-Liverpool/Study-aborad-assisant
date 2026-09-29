@@ -136,7 +136,11 @@ def get_stage_llm_client(stage: str) -> OpenAICompatibleLLM:
         "router": settings.router_llm_model,
         "notice": settings.notice_llm_model,
         "assignment": settings.assignment_llm_model,
+        "planner": settings.planner_llm_model,
         "email": settings.email_llm_model,
+        "travel": settings.travel_llm_model,
+        "finance": settings.finance_llm_model,
+        "fitness": settings.fitness_llm_model,
         "social": settings.social_llm_model,
         "memory": settings.memory_llm_model,
     }

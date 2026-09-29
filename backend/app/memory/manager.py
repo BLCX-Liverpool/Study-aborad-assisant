@@ -1,15 +1,16 @@
 from app.memory.continuity import TopicContinuityDetector
+from app.memory.candidates import MemoryCandidateService
 from app.memory.compression import MemoryCompressor
 from app.memory.llm_judge import TopicAmbiguityJudge
 from app.memory.namespaces import infer_memory_namespace
-from app.memory.policy import retention_policy_for
 from app.memory.query_rewrite import QueryRewriter
 from app.memory.repository import ConversationRepository, LongTermMemoryRepository
 from app.memory.router import MemoryRouter
-from app.memory.short_term import InMemoryShortTermMemoryStore, should_compress, summarize_messages
+from app.memory.short_term import InMemoryShortTermMemoryStore, ShortTermMemoryConfig, should_compress, summarize_messages
+from app.core.llm import get_stage_llm_client
 from app.rag.embeddings import EmbeddingService
 from app.schemas.chat import ChatRequest, ChatTurn
-from app.schemas.memory import LongTermMemoryItem, MemoryContext
+from app.schemas.memory import LongTermMemoryItem, MemoryCandidateInput, MemoryContext
 from app.schemas.router import RouterOutput
 
 
@@ -27,15 +28,16 @@ class MemoryManager:
         embedding_service: EmbeddingService | None = None,
         max_context_tokens: int = 1200,
     ) -> None:
+        memory_llm = get_stage_llm_client("memory")
         self.short_term_store = short_term_store or InMemoryShortTermMemoryStore()
         self.conversation_repository = conversation_repository
         self.long_term_repository = long_term_repository
-        self.memory_router = memory_router or MemoryRouter()
+        self.memory_router = memory_router or MemoryRouter(memory_llm)
         self.continuity_detector = continuity_detector or TopicContinuityDetector()
-        self.query_rewriter = query_rewriter or QueryRewriter()
-        self.compressor = compressor or MemoryCompressor()
-        self.ambiguity_judge = ambiguity_judge or TopicAmbiguityJudge()
-        self.embedding_service = embedding_service
+        self.query_rewriter = query_rewriter or QueryRewriter(memory_llm)
+        self.compressor = compressor or MemoryCompressor(memory_llm)
+        self.ambiguity_judge = ambiguity_judge or TopicAmbiguityJudge(memory_llm)
+        self.embedding_service = embedding_service or EmbeddingService(memory_llm)
         self.max_context_tokens = max_context_tokens
 
     async def build_context(
@@ -53,8 +55,17 @@ class MemoryManager:
             recent_messages=recent_messages,
             initial=topic,
         )
-        rewrite = self.query_rewriter.rewrite(request.message, topic)
-        routing = self.memory_router.route(rewrite.rewritten_query, router_output)
+        rewrite = await self.query_rewriter.rewrite_async(
+            query=request.message,
+            topic=topic,
+            recent_messages=recent_messages,
+        )
+        routing = await self.memory_router.route_async(
+            query=rewrite.rewritten_query,
+            router_output=router_output,
+            recent_messages=recent_messages,
+            topic=topic,
+        )
 
         long_term_memories: list[LongTermMemoryItem] = []
         query_embedding = await self._embed_optional(rewrite.rewritten_query)
@@ -67,17 +78,13 @@ class MemoryManager:
                 query_embedding=query_embedding,
             )
 
-        compressed_summary = ""
-        if should_compress(recent_messages, self.max_context_tokens):
-            compressed_summary = await self.compressor.compress(recent_messages)
-
         return MemoryContext(
             routing=routing,
             topic=topic,
             query_rewrite=rewrite,
             recent_messages=recent_messages,
             long_term_memories=long_term_memories,
-            prompt_context=_build_prompt_context(recent_messages, long_term_memories, compressed_summary),
+            prompt_context=_build_prompt_context(recent_messages, long_term_memories),
         )
 
     async def update_after_response(
@@ -114,29 +121,35 @@ class MemoryManager:
             )
 
         if self.long_term_repository is not None and router_output.primary_intent != "wellbeing":
-            for content in _extract_memory_candidates(request.message):
-                policy = retention_policy_for(
-                    content,
-                    user_confirmed=_has_explicit_memory_confirmation(request.message),
-                )
-                if not policy.retain:
-                    continue
-                namespace = infer_memory_namespace(content)
-                await self.long_term_repository.add_memory(
-                    user_id=request.user_id,
-                    namespace=namespace,
-                    memory_type="user_preference",
+            candidates = [
+                MemoryCandidateInput(
+                    namespace=infer_memory_namespace(content),
                     content=content,
                     source_type="conversation",
                     source_id=conversation_id,
-                    embedding=await self._embed_optional(content),
-                    access_policy={
-                        "sensitivity": policy.sensitivity,
-                        "requires_user_confirmation": policy.requires_user_confirmation,
-                        "expires_at": policy.expires_at.isoformat() if policy.expires_at else None,
-                        "reason": policy.reason,
-                    },
+                    confidence=0.7,
+                    confirmed=_has_explicit_memory_confirmation(request.message),
+                    agent_name=router_output.primary_intent,
                 )
+                for content in _extract_memory_candidates(request.message)
+            ]
+            if candidates:
+                await MemoryCandidateService(
+                    self.long_term_repository,
+                    embedding_service=self.embedding_service,
+                ).persist_candidates(
+                    user_id=request.user_id,
+                    candidates=candidates,
+                    requested=True,
+                    confirmed=_has_explicit_memory_confirmation(request.message),
+                    source_id=conversation_id,
+                )
+
+        await self._compress_short_term_if_needed(
+            user_id=request.user_id,
+            conversation_id=conversation_id,
+            router_output=router_output,
+        )
 
         if self.conversation_repository is not None:
             await self.conversation_repository.commit()
@@ -149,6 +162,52 @@ class MemoryManager:
         except Exception:
             return None
         return embeddings[0] if embeddings else None
+
+    async def _compress_short_term_if_needed(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        router_output: RouterOutput,
+    ) -> str:
+        load_all = getattr(self.short_term_store, "load_all", None)
+        replace_all = getattr(self.short_term_store, "replace_all", None)
+        if load_all is None or replace_all is None:
+            return ""
+        messages: list[ChatTurn] = await load_all(conversation_id)
+        config = getattr(self.short_term_store, "config", ShortTermMemoryConfig())
+        if not should_compress(messages, self.max_context_tokens, config):
+            return ""
+
+        retain_count = max(2, getattr(config, "retained_recent_messages", 6))
+        retained = messages[-retain_count:] if len(messages) > retain_count else []
+        to_compress = messages[:-retain_count] if retained else messages
+        summary = await self.compressor.compress(to_compress)
+        if not summary:
+            return ""
+        compressed_turn = ChatTurn(role="system", content=f"短期记忆压缩摘要：{summary}")
+        await replace_all(conversation_id, [compressed_turn, *retained])
+
+        if self.long_term_repository is not None:
+            embedding = await self._embed_optional(summary)
+            await self.long_term_repository.add_memory(
+                user_id=user_id,
+                namespace=str(infer_memory_namespace(summary)),
+                memory_type="conversation_summary",
+                content=summary,
+                source_type="short_term_compression",
+                source_id=conversation_id,
+                confidence=0.75,
+                embedding=embedding,
+                access_policy={
+                    "requires_user_confirmation": False,
+                    "confirmed": True,
+                    "rejected": False,
+                    "reason": "Generated by short-term memory compression at the configured threshold.",
+                    "agent_name": router_output.primary_intent,
+                },
+            )
+        return summary
 
 
 def _build_prompt_context(

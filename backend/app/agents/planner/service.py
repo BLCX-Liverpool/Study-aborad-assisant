@@ -2,6 +2,7 @@ from app.agents.planner.conflicts import ConflictChecker
 from app.agents.planner.deadline_planner import AssignmentDeadlinePlanner
 from app.agents.planner.global_planner import GlobalPlanner
 from app.agents.planner.reminders import ReminderScheduler
+from app.core.llm import get_stage_llm_client
 from app.schemas.planner import AssignmentPlanningRequest, GlobalPlanningRequest, PlannerOutput
 
 
@@ -14,7 +15,7 @@ class TaskPlannerService:
         reminder_scheduler: ReminderScheduler | None = None,
     ) -> None:
         self.deadline_planner = deadline_planner or AssignmentDeadlinePlanner()
-        self.global_planner = global_planner or GlobalPlanner()
+        self.global_planner = global_planner or GlobalPlanner(get_stage_llm_client("planner"))
         self.conflict_checker = conflict_checker or ConflictChecker()
         self.reminder_scheduler = reminder_scheduler or ReminderScheduler()
 
@@ -39,8 +40,8 @@ class TaskPlannerService:
             }
         )
 
-    def plan_global(self, request: GlobalPlanningRequest) -> PlannerOutput:
-        plan = self.global_planner.plan(request)
+    async def plan_global(self, request: GlobalPlanningRequest) -> PlannerOutput:
+        plan = await self.global_planner.plan(request)
         conflict_findings = self.conflict_checker.check(
             tasks=plan.tasks,
             events=plan.events,

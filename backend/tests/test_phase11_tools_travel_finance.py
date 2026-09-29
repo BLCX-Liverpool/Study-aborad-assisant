@@ -12,8 +12,8 @@ from app.agents.travel.route_provider import TravelProviderResult
 from app.agents.travel.service import TravelAgentService
 from app.documents.models import DocumentContentType, ParsedDocument, ParsedDocumentElement
 from app.schemas.finance import BudgetGoalInput, BudgetGoalRequest, FinanceBillParseRequest
-from app.schemas.planner import SavedPlannerOutput
-from app.schemas.tools import WeatherForecast, WeatherLookupRequest
+from app.schemas.planner import PlannerOutput, SavedPlannerOutput
+from app.schemas.tools import WeatherForecast, WeatherLookupRequest, WeatherLookupResponse
 from app.schemas.travel import RouteSuggestion, TravelItineraryRequest, TravelMemoryCandidate, TravelPlaceSuggestion
 from app.tools.executor import ToolExecutor
 from app.tools.logging import ToolExecutionLogger
@@ -39,12 +39,14 @@ def test_default_tool_registry_exposes_weather_lookup() -> None:
         "browser.mcp.search_extract",
         "travel.maps.directions",
         "travel.maps.places",
+        "finance.exchange_rate",
     }.issubset(names)
     weather = registry.get("weather.lookup").spec
     assert weather.permission_level == PermissionLevel.SEARCH
     assert weather.requires_approval is False
     assert registry.get("calendar.event.draft").spec.permission_level == PermissionLevel.WRITE_DRAFT
     assert registry.get("calendar.event.draft").spec.requires_approval is False
+    assert registry.get("finance.exchange_rate").spec.permission_level == PermissionLevel.READ
 
 
 def test_default_tool_registry_reports_provider_availability(monkeypatch) -> None:
@@ -363,7 +365,7 @@ def test_google_maps_tools_call_live_endpoints_and_parse_results(monkeypatch) ->
 
 def test_travel_itinerary_generator_creates_days_budget_and_weather_notes(monkeypatch) -> None:
     monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
-    request = TravelItineraryRequest(
+    travel_request = TravelItineraryRequest(
         user_id="user_1",
         origin="London",
         destination="Manchester",
@@ -383,7 +385,7 @@ def test_travel_itinerary_generator_creates_days_budget_and_weather_notes(monkey
         ],
     )
 
-    output = TravelItineraryGenerator().generate(request)
+    output = TravelItineraryGenerator().generate(travel_request)
 
     assert len(output.days) == 2
     assert output.days[0].weather is not None
@@ -427,7 +429,7 @@ def test_travel_itinerary_uses_provider_routes_and_places() -> None:
         def statuses(self):
             return []
 
-    request = TravelItineraryRequest(
+    travel_request = TravelItineraryRequest(
         user_id="user_1",
         origin="London",
         destination="Manchester",
@@ -438,7 +440,7 @@ def test_travel_itinerary_uses_provider_routes_and_places() -> None:
         accommodation_needed=True,
     )
 
-    output = TravelItineraryGenerator(route_provider=FakeRouteProvider()).generate(request)
+    output = TravelItineraryGenerator(route_provider=FakeRouteProvider()).generate(travel_request)
 
     assert output.route_suggestions[0].source == "provider_verified"
     assert output.place_suggestions[0].name == "Campus Cafe"
@@ -446,6 +448,97 @@ def test_travel_itinerary_uses_provider_routes_and_places() -> None:
     assert "Campus Cafe" in output.days[0].events[1].description
     assert output.information_sources[1].tool_name == "travel.maps.directions"
     assert any(item.estimate_basis and "Google Maps route context" in item.estimate_basis for item in output.budget_breakdown)
+
+
+@pytest.mark.asyncio
+async def test_travel_itinerary_async_auto_fetches_weather() -> None:
+    class FakeRouteProvider:
+        def collect(self, request):
+            return TravelProviderResult()
+
+        async def collect_async(self, request):
+            return TravelProviderResult()
+
+        def statuses(self):
+            return []
+
+    class FakeWeatherTool:
+        def __init__(self):
+            self.requests = []
+
+        async def lookup(self, request):
+            self.requests.append(request)
+            return WeatherLookupResponse(
+                location=request.location,
+                forecasts=[
+                    WeatherForecast(
+                        date=date(2026, 10, 3),
+                        location=request.location,
+                        condition="rain",
+                        precipitation_probability=80,
+                        notes=["Pack waterproof layers."],
+                    )
+                ],
+            )
+
+    weather_tool = FakeWeatherTool()
+    request = TravelItineraryRequest(
+        user_id="user_1",
+        origin="London",
+        destination="Manchester",
+        depart_at=datetime(2026, 10, 3, 9, 0, tzinfo=UTC),
+        return_at=datetime(2026, 10, 4, 18, 0, tzinfo=UTC),
+        purpose="academic_trip",
+    )
+
+    output = await TravelItineraryGenerator(
+        route_provider=FakeRouteProvider(),
+        weather_tool=weather_tool,
+    ).generate_async(request)
+
+    assert weather_tool.requests[0].location == "Manchester"
+    assert weather_tool.requests[0].days == 2
+    assert output.days[0].weather is not None
+    assert output.days[0].weather.condition == "rain"
+    assert any(source.tool_name == "weather.lookup" for source in output.information_sources)
+    assert any(status.name == "weather.lookup" and status.available for status in output.tool_statuses)
+    assert "weather lookup" in output.summary
+
+
+@pytest.mark.asyncio
+async def test_travel_itinerary_async_does_not_refetch_provided_weather() -> None:
+    class FakeRouteProvider:
+        async def collect_async(self, request):
+            return TravelProviderResult()
+
+        def statuses(self):
+            return []
+
+    class FailingWeatherTool:
+        async def lookup(self, request):
+            raise AssertionError("weather lookup should not run when forecasts are provided")
+
+    request = TravelItineraryRequest(
+        user_id="user_1",
+        origin="London",
+        destination="Manchester",
+        depart_at=datetime(2026, 10, 3, 9, 0, tzinfo=UTC),
+        weather_forecasts=[
+            WeatherForecast(
+                date=date(2026, 10, 3),
+                location="Manchester",
+                condition="clear",
+            )
+        ],
+    )
+
+    output = await TravelItineraryGenerator(
+        route_provider=FakeRouteProvider(),
+        weather_tool=FailingWeatherTool(),
+    ).generate_async(request)
+
+    assert output.days[0].weather is not None
+    assert output.days[0].weather.condition == "clear"
 
 
 @pytest.mark.asyncio
@@ -486,7 +579,7 @@ async def test_travel_planner_persistence_saves_confirmed_itinerary() -> None:
             saved_plan["plan"] = plan
             return SavedPlannerOutput(task_ids=["task_1"], event_ids=["event_1"], reminder_ids=["reminder_1"])
 
-    request = TravelItineraryRequest(
+    travel_request = TravelItineraryRequest(
         user_id="user_1",
         origin="London",
         destination="Manchester",
@@ -495,10 +588,44 @@ async def test_travel_planner_persistence_saves_confirmed_itinerary() -> None:
         planner_confirmed=True,
         accommodation_needed=True,
     )
-    output = TravelItineraryGenerator().generate(request)
+    output = TravelItineraryGenerator().generate(travel_request)
 
-    result = await TravelPlannerPersistenceService(FakePlannerRepository()).persist_itinerary(
-        request=request,
+    class FakePlannerService:
+        async def plan_global(self, request):
+            return PlannerOutput(
+                tasks=[
+                    {
+                        "title": output.planner_items[0].title,
+                        "description": output.planner_items[0].description,
+                        "source_type": output.planner_items[0].action_type,
+                        "source_id": output.planner_items[0].source_id,
+                        "start_time": output.planner_items[0].start_time,
+                        "deadline": output.planner_items[0].deadline,
+                        "estimated_minutes": 60,
+                        "priority": output.planner_items[0].priority,
+                        "evidence": output.planner_items[0].evidence,
+                    }
+                ],
+                events=[
+                    {
+                        "title": "Travel to Manchester",
+                        "description": output.summary,
+                        "start_time": travel_request.depart_at,
+                        "end_time": travel_request.depart_at,
+                        "source_type": "travel",
+                        "evidence": [],
+                    }
+                ],
+                reminders=[],
+                assumptions=["Fake LLM-ToT planner output for persistence test."],
+                selected_strategy="fake_llm_tot",
+            )
+
+    result = await TravelPlannerPersistenceService(
+        FakePlannerRepository(),
+        planner_service=FakePlannerService(),
+    ).persist_itinerary(
+        request=travel_request,
         output=output,
     )
 
@@ -645,6 +772,8 @@ def test_finance_bill_parser_extracts_obligation_and_due_task() -> None:
     assert output.obligations[0].amount == 1250.0
     assert output.obligations[0].due_date == date(2026, 10, 12)
     assert output.action_items[0].deadline is not None
+    assert output.planner_items[0].action_type == "bill_due"
+    assert output.planner_items[0].deadline is not None
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ import re
 from datetime import UTC, date, datetime, timedelta
 
 from app.schemas.common import PlannedTask
+from app.agents.finance.obligations import build_planner_items
 from app.schemas.finance import (
     BillType,
     FinanceBillParseOutput,
@@ -42,6 +43,7 @@ class FinanceBillParser:
         return FinanceBillParseOutput(
             obligations=[obligation],
             action_items=action_items,
+            planner_items=build_planner_items([obligation]),
             risk_notes=_risk_notes(obligation),
             assumptions=_assumptions(obligation),
         )
@@ -60,6 +62,8 @@ def _obligation_from_text(text: str, request: FinanceBillParseRequest) -> Financ
         description=_description(bill_type, request.source_name),
         source_name=request.source_name,
         recurring=_looks_recurring(text),
+        billing_period=_billing_period(text),
+        source_type="parsed_bill",
         evidence_text=_evidence_text(text),
     )
 
@@ -124,7 +128,22 @@ def _normalize_currency(raw: str) -> str:
 
 def _looks_recurring(text: str) -> bool:
     lowered = text.lower()
-    return any(keyword in lowered for keyword in ("monthly", "per month", "recurring", "每月", "月付"))
+    return any(keyword in lowered for keyword in ("weekly", "monthly", "quarterly", "termly", "annual", "per month", "recurring", "每周", "每月", "月付", "每年"))
+
+
+def _billing_period(text: str) -> str:
+    lowered = text.lower()
+    if any(keyword in lowered for keyword in ("weekly", "per week", "每周")):
+        return "weekly"
+    if any(keyword in lowered for keyword in ("quarterly", "per quarter", "每季度")):
+        return "quarterly"
+    if any(keyword in lowered for keyword in ("termly", "per term", "每学期")):
+        return "termly"
+    if any(keyword in lowered for keyword in ("annual", "yearly", "per year", "每年")):
+        return "annual"
+    if any(keyword in lowered for keyword in ("monthly", "per month", "recurring", "每月", "月付")):
+        return "monthly"
+    return "one_time"
 
 
 def _description(bill_type: BillType, source_name: str | None) -> str:

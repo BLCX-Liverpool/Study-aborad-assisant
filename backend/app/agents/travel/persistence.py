@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from app.agents.planner.repository import PlannerRepository
 from app.agents.planner.reminders import ReminderScheduler
 from app.agents.planner.service import TaskPlannerService
+from app.memory.candidates import MemoryCandidateService
 from app.memory.repository import LongTermMemoryRepository
 from app.schemas.planner import GlobalPlanningRequest, PlannerOutput
 from app.schemas.travel import (
@@ -72,7 +73,7 @@ class TravelPlannerPersistenceService:
             )
 
         existing_blocks = await self.planner_repository.list_schedule_blocks(request.user_id)
-        plan = self.planner_service.plan_global(
+        plan = await self.planner_service.plan_global(
             GlobalPlanningRequest(
                 user_id=request.user_id,
                 items=output.planner_items,
@@ -103,9 +104,16 @@ def _planning_horizon_days(request: TravelPlanRequest) -> int:
     return max(1, min(days, 180))
 
 
+def _travel_memory_status(status: str) -> str:
+    if status in {"not_requested", "pending_confirmation", "confirmed", "failed"}:
+        return status
+    return "not_requested"
+
+
 class TravelMemoryConfirmationService:
     def __init__(self, repository: LongTermMemoryRepository) -> None:
         self.repository = repository
+        self.candidate_service = MemoryCandidateService(repository)
 
     async def persist_candidates(
         self,
@@ -125,58 +133,25 @@ class TravelMemoryConfirmationService:
                 assumptions=["Travel Agent did not produce memory candidates for this request."],
             )
 
-        pending_ids: list[str] = []
-        confirmed_ids: list[str] = []
-        try:
-            for candidate in candidates:
-                if confirmed or candidate.confirmed:
-                    memory_id = await self.repository.add_memory(
-                        user_id=user_id,
-                        namespace=candidate.namespace,
-                        memory_type="user_preference",
-                        content=candidate.content,
-                        source_type=candidate.source_type,
-                        source_id=source_id,
-                        confidence=candidate.confidence,
-                        access_policy={
-                            "requires_user_confirmation": False,
-                            "confirmed": True,
-                            "reason": "Confirmed by user through Travel memory confirmation flow.",
-                        },
-                    )
-                    confirmed_ids.append(memory_id)
-                    continue
-                memory_id = await self.repository.add_memory_candidate(
-                    user_id=user_id,
-                    namespace=candidate.namespace,
-                    content=candidate.content,
-                    source_type=candidate.source_type,
-                    source_id=source_id,
-                    confidence=candidate.confidence,
-                )
-                pending_ids.append(memory_id)
-        except Exception as exc:
-            return TravelMemoryConfirmationResult(
-                status="failed",
-                candidate_count=len(candidates),
-                error=f"{type(exc).__name__}: {exc}",
-            )
-
+        result = await self.candidate_service.persist_candidates(
+            user_id=user_id,
+            candidates=candidates,
+            requested=requested,
+            confirmed=confirmed,
+            source_id=source_id,
+        )
         return TravelMemoryConfirmationResult(
-            status="confirmed" if confirmed_ids and not pending_ids else "pending_confirmation",
-            candidate_count=len(candidates),
-            pending_memory_ids=pending_ids,
-            confirmed_memory_ids=confirmed_ids,
-            assumptions=[
-                "Pending travel memory candidates are excluded from long-term retrieval until explicitly confirmed."
-                if pending_ids
-                else "Confirmed travel memory candidates are available to the travel memory namespace."
-            ],
+            status=_travel_memory_status(result.status),
+            candidate_count=result.candidate_count,
+            pending_memory_ids=result.pending_memory_ids,
+            confirmed_memory_ids=result.confirmed_memory_ids,
+            assumptions=result.assumptions,
+            error=result.error,
         )
 
     async def confirm(self, *, user_id: str, memory_ids: list[str]) -> TravelMemoryConfirmationResult:
         try:
-            confirmed_ids = await self.repository.confirm_memory_candidates(user_id=user_id, memory_ids=memory_ids)
+            result = await self.candidate_service.confirm(user_id=user_id, memory_ids=memory_ids)
         except Exception as exc:
             return TravelMemoryConfirmationResult(
                 status="failed",
@@ -184,8 +159,9 @@ class TravelMemoryConfirmationService:
                 error=f"{type(exc).__name__}: {exc}",
             )
         return TravelMemoryConfirmationResult(
-            status="confirmed" if confirmed_ids else "pending_confirmation",
+            status=_travel_memory_status(result.status),
             candidate_count=len(memory_ids),
-            confirmed_memory_ids=confirmed_ids,
-            assumptions=["Confirmed pending travel memory candidates." if confirmed_ids else "No matching pending travel memory candidates were found."],
+            confirmed_memory_ids=result.memory_ids,
+            assumptions=result.assumptions,
+            error=result.error,
         )

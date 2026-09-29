@@ -6,6 +6,7 @@ from app.agents.orchestrator.graph import build_orchestrator_graph
 from app.agents.orchestrator.multi_intent_executor import MultiIntentExecutionPlanner
 from app.agents.orchestrator.repository import RouterObservationRepository
 from app.agents.orchestrator.service import StudyAbroadOrchestrator
+from app.agents.orchestrator.state_store import ConversationStateStore
 from app.agents.orchestrator.workers import WorkerAgentSpec, WorkerContext, WorkerRegistry, WorkerRunResult
 from app.schemas.chat import AgentArtifact
 from app.schemas.chat import ChatRequest
@@ -117,6 +118,8 @@ async def test_orchestrator_executes_multi_worker_plan_with_artifact_handoff() -
 
         async def run(self, context: WorkerContext) -> WorkerRunResult:
             assert context.execution_step is not None
+            assert context.agent_state is not None
+            assert context.agent_state.agent_name == "travel"
             assert context.request.agent_inputs["travel"]["destination"] == "Manchester"
             return WorkerRunResult(
                 final_response="travel completed",
@@ -139,6 +142,8 @@ async def test_orchestrator_executes_multi_worker_plan_with_artifact_handoff() -
         )
 
         async def run(self, context: WorkerContext) -> WorkerRunResult:
+            assert context.agent_state is not None
+            assert context.agent_state.agent_name == "finance"
             assert any(artifact.kind == "travel_plan" for artifact in context.existing_artifacts)
             return WorkerRunResult(
                 final_response="finance completed",
@@ -146,14 +151,16 @@ async def test_orchestrator_executes_multi_worker_plan_with_artifact_handoff() -
                 trace_events=[{"name": "worker.completed", "payload": {"agent": "finance"}}],
             )
 
+    state_store = ConversationStateStore()
     graph = build_orchestrator_graph(
         router=FakeRouter(),
         memory_manager=FakeMemoryManager(),
         worker_registry=WorkerRegistry(workers=[FakeTravelWorker(), FakeFinanceWorker()]),
+        state_store=state_store,
     )
 
     result = await graph.ainvoke(
-        {"request": ChatRequest(user_id="user_1", message="帮我规划旅行并估算预算")}
+        {"request": ChatRequest(user_id="user_1", conversation_id="conv_multi", message="帮我规划旅行并估算预算")}
     )
 
     response = result["response"]
@@ -167,6 +174,10 @@ async def test_orchestrator_executes_multi_worker_plan_with_artifact_handoff() -
     assert [step["status"] for step in execution_artifact.payload["steps"]] == ["completed", "completed"]
     assert response.latency_summary is not None
     assert any(item.span_name.startswith("worker.travel") for item in response.latency_summary.slowest_spans)
+    conv_state = state_store.get_or_create(user_id="user_1", conversation_id="conv_multi")
+    assert set(conv_state.agent_states) >= {"travel", "finance"}
+    assert conv_state.agent_states["travel"].artifacts[0].kind == "travel_plan"
+    assert conv_state.agent_states["finance"].artifacts[0].kind == "finance_plan"
 
 
 @pytest.mark.asyncio

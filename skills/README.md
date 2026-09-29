@@ -2,7 +2,13 @@
 
 本目录存放留学生活助手项目内的 Skill 定义。
 
-这些 Skill 是产品内部能力说明，不是 Codex 桌面应用插件。它们用于沉淀各 Agent 的触发条件、工作流程、输入输出契约、证据要求和安全边界，后续可由 Router / Orchestrator 读取并映射到后端 Agent。
+这些 Skill 是产品内部能力说明，不是 Codex 桌面应用插件。它们用于沉淀各 Agent 的触发条件、工作流程、输入输出契约、证据要求和安全边界。
+
+当前运行时接入边界：
+
+- `social-content-writing` 已作为 Social Content Agent 的 LLM prompt/reference 层接入。
+- `tanchengyi-fitness` 已作为 Fitness Agent 的 LLM prompt/reference 层接入。
+- 其他 Skill 暂时仍作为文档化能力契约，不参与通用动态调度。
 
 ## 目录规范
 
@@ -32,6 +38,7 @@ skills/
 - `finance-budgeting`：留学生预算分析和 CSV 支出整理。
 - `wellbeing-support`：低风险支持性对话和危机识别。
 - `fitness-planning`：一般性健身计划、训练日和习惯任务。
+- `tanchengyi-fitness`：外部谭成义健身 Skill 的项目适配版，用于增强 Fitness Agent 的训练动作质量和自然健美风格。
 - `social-content-writing`：留学生活社交平台文案生成和隐私检查。
 
 ## 与后端模块的关系
@@ -45,4 +52,4 @@ skills/*/SKILL.md
   -> backend/app/api/routes/*
 ```
 
-第一版不实现动态 Skill 加载；Skill 与 Agent 的映射先作为显式文档约定维护。
+当前由 `backend/app/skills/loader.py` 提供有限运行时读取能力。Agent 不会被 Skill 替换；Skill 只进入 prompt/reference 层，最终输出仍必须符合后端 schema 和安全边界。

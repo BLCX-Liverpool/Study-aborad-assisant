@@ -9,7 +9,9 @@ from app.api.routes import (
     finance,
     fitness,
     health,
+    memory,
     notice,
+    observability,
     planner,
     rag,
     social_content,
@@ -27,7 +29,9 @@ api_router.include_router(execution.router, prefix="/execution", tags=["executio
 api_router.include_router(files.router, prefix="/files", tags=["files"])
 api_router.include_router(finance.router, prefix="/finance", tags=["finance"])
 api_router.include_router(fitness.router, prefix="/fitness", tags=["fitness"])
+api_router.include_router(memory.router, prefix="/memory", tags=["memory"])
 api_router.include_router(notice.router, prefix="/notice", tags=["notice"])
+api_router.include_router(observability.router, prefix="/observability", tags=["observability"])
 api_router.include_router(planner.router, prefix="/planner", tags=["planner"])
 api_router.include_router(rag.router, prefix="/rag", tags=["rag"])
 api_router.include_router(social_content.router, prefix="/social-content", tags=["social-content"])

@@ -2,7 +2,7 @@ from app.agents.social_content.copy_generator import SocialCopyGenerator
 from app.agents.social_content.llm_generator import LlmSocialCopyGenerator
 from app.agents.social_content.platform import SocialPlatformClassifier, SocialPlatformStandards
 from app.agents.social_content.safety import SocialContentSafetyChecker
-from app.schemas.social_content import ImageGenerationToolDesign, SocialContentOutput, SocialContentRequest
+from app.schemas.social_content import ImageGenerationToolDesign, SocialContentOutput, SocialContentRequest, SocialMemoryCandidate
 
 
 class SocialContentAgentService:
@@ -34,6 +34,7 @@ class SocialContentAgentService:
             platform_standard=standard,
             platform_notes=_platform_notes(platform),
             image_generation_tool=_image_tool_design(),
+            memory_candidates=_memory_candidates(request, platform),
             assumptions=_assumptions(request),
         )
 
@@ -57,6 +58,7 @@ class SocialContentAgentService:
             platform_standard=standard,
             platform_notes=_platform_notes(platform),
             image_generation_tool=_image_tool_design(),
+            memory_candidates=_memory_candidates(request, platform),
             assumptions=_assumptions(request),
         )
 
@@ -97,3 +99,32 @@ def _image_tool_design() -> ImageGenerationToolDesign:
             "output_size",
         ]
     )
+
+
+def _memory_candidates(request: SocialContentRequest, platform: str) -> list[SocialMemoryCandidate]:
+    candidates = [
+        SocialMemoryCandidate(
+            content=(
+                f"Social content preference: platform {platform}, tone {request.tone}, "
+                f"language {request.language}."
+            ),
+            confirmed=request.memory_confirmed,
+        )
+    ]
+    if request.audience:
+        candidates.append(
+            SocialMemoryCandidate(
+                content=f"Social content audience preference: {request.audience[:200]}",
+                confirmed=request.memory_confirmed,
+                confidence=0.7,
+            )
+        )
+    if request.notes and any(signal in request.notes.lower() for signal in ("prefer", "喜欢", "希望", "tone", "风格")):
+        candidates.append(
+            SocialMemoryCandidate(
+                content=f"Social content style preference: {request.notes[:300]}",
+                confirmed=request.memory_confirmed,
+                confidence=0.68,
+            )
+        )
+    return candidates

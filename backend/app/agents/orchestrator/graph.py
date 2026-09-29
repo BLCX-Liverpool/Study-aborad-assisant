@@ -4,11 +4,11 @@ import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, TypedDict
-from uuid import uuid4
 
 from app.agents.orchestrator.multi_intent_executor import MultiIntentExecutionPlanner
 from app.agents.orchestrator.repository import AgentRunRecorder, RouterObservationRepository, TraceSpanRepository
 from app.agents.orchestrator.state import AgentState
+from app.agents.orchestrator.state_store import ConversationStateStore, default_conversation_state_store
 from app.agents.orchestrator.workers import (
     WorkerContext,
     WorkerRegistry,
@@ -18,7 +18,7 @@ from app.agents.orchestrator.workers import (
 from app.agents.router.service import IntentRouter
 from app.core.tracing import capture_latency_span, summarize_latency_spans
 from app.memory.manager import MemoryManager
-from app.schemas.chat import ChatRequest, ChatResponse, ChatTurn
+from app.schemas.chat import ChatRequest, ChatResponse
 from app.schemas.execution import ExecutionStep, MultiIntentExecutionPlan, MultiIntentExecutionRequest
 from app.schemas.router import Intent, RouterOutput
 from app.tools.executor import ToolExecutor
@@ -53,6 +53,7 @@ def build_orchestrator_graph(
     recorder: AgentRunRecorder | None = None,
     router_observations: RouterObservationRepository | None = None,
     trace_spans: TraceSpanRepository | None = None,
+    state_store: ConversationStateStore | None = None,
 ):
     """Build the production LangGraph orchestrator for the `/api/chat` path."""
 
@@ -69,6 +70,7 @@ def build_orchestrator_graph(
         recorder=recorder,
         router_observations=router_observations,
         trace_spans=trace_spans,
+        state_store=state_store or default_conversation_state_store,
     )
 
     graph = StateGraph(OrchestratorGraphState)
@@ -110,6 +112,7 @@ class OrchestratorGraphRuntime:
         recorder: AgentRunRecorder | None,
         router_observations: RouterObservationRepository | None,
         trace_spans: TraceSpanRepository | None,
+        state_store: ConversationStateStore,
     ) -> None:
         self.router = router
         self.memory_manager = memory_manager
@@ -118,23 +121,26 @@ class OrchestratorGraphRuntime:
         self.recorder = recorder
         self.router_observations = router_observations
         self.trace_spans = trace_spans
+        self.state_store = state_store
 
     async def initialize(self, graph_state: OrchestratorGraphState) -> OrchestratorGraphState:
         request = graph_state["request"]
-        state = AgentState(
+        state = self.state_store.get_or_create(
             user_id=request.user_id,
-            conversation_id=request.conversation_id or str(uuid4()),
-            messages=[*request.history, ChatTurn(role="user", content=request.message)],
-            uploaded_file_ids=request.uploaded_file_ids,
+            conversation_id=request.conversation_id,
         )
+        state.prepare_for_request(request)
+        request = request.model_copy(update={"conversation_id": state.conversation_id})
         state.add_trace(
             "chat.received",
             {
                 "conversation_id": state.conversation_id,
                 "uploaded_file_ids": request.uploaded_file_ids,
+                "state_message_count": len(state.messages),
+                "state_artifact_count": len(state.artifacts),
             },
         )
-        return {**graph_state, "agent_state": state}
+        return {**graph_state, "request": request, "agent_state": state}
 
     async def route(self, graph_state: OrchestratorGraphState) -> OrchestratorGraphState:
         request = graph_state["request"]
@@ -177,6 +183,9 @@ class OrchestratorGraphRuntime:
             )
             span_output["memory_source"] = memory_context.routing.memory_source
             span_output["long_term_count"] = len(memory_context.long_term_memories)
+            span_output["memory_ids"] = [
+                memory.id for memory in memory_context.long_term_memories if memory.id
+            ]
             span_output["query_rewritten"] = memory_context.query_rewrite.changed
         state.memory_context = memory_context
         state.add_trace(
@@ -187,6 +196,7 @@ class OrchestratorGraphRuntime:
                 "topic_relation": memory_context.topic.relation,
                 "query_rewritten": memory_context.query_rewrite.changed,
                 "long_term_count": len(memory_context.long_term_memories),
+                "memory_ids": [memory.id for memory in memory_context.long_term_memories if memory.id],
             },
         )
 
@@ -301,14 +311,24 @@ class OrchestratorGraphRuntime:
                         "output_artifact_kind": worker.spec.output_artifact_kind,
                         "required_tools": worker.spec.required_tools,
                         "memory_namespaces": worker.spec.memory_namespaces,
+                        "memory_count": _memory_count_for_worker(state, worker.spec.memory_namespaces),
                     },
                 )
-                result = await worker.run(WorkerContext(request=request, existing_artifacts=state.artifacts))
+                agent_state = state.get_agent_state(worker.spec.intent)
+                agent_state.begin_run(run_id=state.run_id, trace_id=state.trace_id, request=request)
+                result = await worker.run(
+                    WorkerContext(
+                        request=request,
+                        agent_state=agent_state,
+                        memory_context=state.memory_context,
+                        existing_artifacts=state.artifacts,
+                    )
+                )
                 span_output["implemented"] = True
                 span_output["artifact_count"] = len(result.artifacts)
                 span_output["missing_information_count"] = len(result.missing_information)
 
-        _apply_worker_result(state, result)
+        _apply_worker_result(state, result, agent_name=intent)
         return {**graph_state, "agent_state": state, "worker_result": result}
 
     async def _dispatch_execution_plan(self, graph_state: OrchestratorGraphState) -> OrchestratorGraphState:
@@ -444,9 +464,17 @@ class OrchestratorGraphRuntime:
                 pending_steps.pop(execution.step.index, None)
                 for trace_event in execution.trace_events:
                     state.add_trace(trace_event.get("name", "worker.event"), trace_event.get("payload", {}))
-                _apply_worker_result(state, execution.worker_result)
+                _apply_worker_result(
+                    state,
+                    execution.worker_result,
+                    agent_name=execution.worker_key[0] if execution.worker_key else execution.step.agent_intent,
+                )
                 for tool_result in execution.tool_results:
-                    state.tool_results.append(tool_result.model_dump(mode="json"))
+                    tool_result_json = tool_result.model_dump(mode="json")
+                    state.tool_results.append(tool_result_json)
+                    state.get_agent_state(
+                        execution.worker_key[0] if execution.worker_key else execution.step.agent_intent
+                    ).tool_results.append(tool_result_json)
                 if execution.worker_result.final_response:
                     response_parts.append(execution.worker_result.final_response)
                 if execution.worker_key:
@@ -588,6 +616,7 @@ class OrchestratorGraphRuntime:
             missing_information=state.missing_information,
             next_actions=state.next_actions,
         )
+        state.append_assistant_turn()
         return {**graph_state, "agent_state": state, "response": response}
 
     def _span(
@@ -653,6 +682,7 @@ class OrchestratorGraphRuntime:
                     "output_artifact_kind": worker.spec.output_artifact_kind,
                     "required_tools": worker.spec.required_tools,
                     "memory_namespaces": worker.spec.memory_namespaces,
+                    "memory_count": _memory_count_for_worker(state, worker.spec.memory_namespaces),
                     "tool_statuses": tool_statuses,
                 },
             },
@@ -669,9 +699,13 @@ class OrchestratorGraphRuntime:
             },
         ) as span_output:
             try:
+                agent_state = state.get_agent_state(worker.spec.intent)
+                agent_state.begin_run(run_id=state.run_id, trace_id=state.trace_id, request=step_request)
                 worker_result = await worker.run(
                     WorkerContext(
                         request=step_request,
+                        agent_state=agent_state,
+                        memory_context=state.memory_context,
                         existing_artifacts=existing_artifacts_snapshot,
                         execution_step=step,
                         tool_statuses=tool_statuses,
@@ -795,12 +829,18 @@ class OrchestratorGraphRuntime:
         return results, trace_events
 
 
-def _apply_worker_result(state: AgentState, result: WorkerRunResult) -> None:
+def _apply_worker_result(state: AgentState, result: WorkerRunResult, *, agent_name: str | None = None) -> None:
     state.artifacts.extend(result.artifacts)
     state.missing_information.extend(result.missing_information)
     state.next_actions.extend(result.next_actions)
     if result.final_response:
         state.final_response = result.final_response
+    if agent_name:
+        agent_state = state.get_agent_state(agent_name)
+        agent_state.artifacts.extend(result.artifacts)
+        agent_state.missing_information.extend(result.missing_information)
+        agent_state.next_actions.extend(result.next_actions)
+        agent_state.append_assistant_turn(result.final_response)
     for event in result.trace_events:
         state.add_trace(event.get("name", "worker.event"), event.get("payload", {}))
 
@@ -845,6 +885,19 @@ def _extract_tool_inputs(request: ChatRequest, step: ExecutionStep) -> dict[str,
 
 def _stable_slots_key(slots: dict[str, Any]) -> str:
     return json.dumps(slots, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _memory_count_for_worker(state: AgentState, namespaces: list[str]) -> int:
+    if state.memory_context is None:
+        return 0
+    allowed = set(namespaces)
+    return len(
+        [
+            memory
+            for memory in state.memory_context.long_term_memories
+            if str(memory.namespace) in allowed
+        ]
+    )
 
 
 def _multi_worker_summary(steps: list[ExecutionStep]) -> str:

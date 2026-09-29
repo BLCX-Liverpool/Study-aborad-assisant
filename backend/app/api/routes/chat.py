@@ -18,19 +18,18 @@ async def chat(
     request: ChatRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ChatResponse:
+    memory_manager = MemoryManager(
+        short_term_store=RedisShortTermMemoryStore(get_redis()),
+        conversation_repository=ConversationRepository(session),
+        long_term_repository=LongTermMemoryRepository(session),
+    )
     if not request.persist_agent_runs:
-        memory_manager = MemoryManager(short_term_store=RedisShortTermMemoryStore(get_redis()))
         return await StudyAbroadOrchestrator(
             memory_manager=memory_manager,
             router_observations=RouterObservationRepository(session),
             trace_spans=TraceSpanRepository(session),
         ).handle_chat(request)
 
-    memory_manager = MemoryManager(
-        short_term_store=RedisShortTermMemoryStore(get_redis()),
-        conversation_repository=ConversationRepository(session),
-        long_term_repository=LongTermMemoryRepository(session),
-    )
     return await StudyAbroadOrchestrator(
         recorder=AgentRunRecorder(session),
         router_observations=RouterObservationRepository(session),

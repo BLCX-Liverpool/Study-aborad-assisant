@@ -4,6 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.schemas.common import PlannedTask
+from app.schemas.memory import MemoryCandidatePersistResponse
 
 FitnessGoal = Literal[
     "general_fitness",
@@ -33,6 +34,8 @@ class FitnessPlanRequest(BaseModel):
     preferred_intensity: WorkoutIntensity = "moderate"
     plan_weeks: int = Field(default=2, ge=1, le=8)
     memory_preferences: list[str] = Field(default_factory=list)
+    save_memory_candidates: bool = False
+    memory_confirmed: bool = False
     remember_preferences: bool = False
     notes: str | None = None
 
@@ -73,6 +76,7 @@ class FitnessPlanOutput(BaseModel):
     schedule_tasks: list[PlannedTask] = Field(default_factory=list)
     progression: list[FitnessProgressionWeek] = Field(default_factory=list)
     memory_candidates: list[FitnessMemoryCandidate] = Field(default_factory=list)
+    memory_confirmation: MemoryCandidatePersistResponse | None = None
     missing_information: list[str] = Field(default_factory=list)
     risk_notes: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)

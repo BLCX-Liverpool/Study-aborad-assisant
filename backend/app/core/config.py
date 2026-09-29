@@ -27,7 +27,11 @@ class Settings(BaseSettings):
     router_embedding_model: str | None = None
     notice_llm_model: str | None = None
     assignment_llm_model: str | None = None
+    planner_llm_model: str | None = None
     email_llm_model: str | None = None
+    travel_llm_model: str | None = None
+    finance_llm_model: str | None = None
+    fitness_llm_model: str | None = None
     social_llm_model: str | None = None
     memory_llm_model: str | None = None
     llm_base_url: str = "https://api.openai.com/v1"
@@ -55,6 +59,7 @@ class Settings(BaseSettings):
     outlook_smtp_from_name: str = "Study Abroad Assistant"
 
     upload_storage_dir: Path = Path("./.data/uploads")
+    research_source_storage_dir: Path = Path("./.data/research_sources")
 
 
 @lru_cache

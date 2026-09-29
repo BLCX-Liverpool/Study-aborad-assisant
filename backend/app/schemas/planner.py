@@ -1,5 +1,7 @@
 from datetime import datetime
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.schemas.action import ActionItem
@@ -47,6 +49,34 @@ class GlobalPlanningRequest(BaseModel):
     planning_horizon_days: int = Field(default=30, ge=1, le=180)
     existing_blocks: list[ScheduleBlock] = Field(default_factory=list)
     memory_preferences: list[str] = Field(default_factory=list)
+    candidate_strategies: list[str] = Field(default_factory=list)
+    max_candidates: int = Field(default=3, ge=1, le=6)
+
+
+class PlannerCandidateScore(BaseModel):
+    conflict_penalty: float = 0.0
+    deadline_safety: float = 0.0
+    priority_alignment: float = 0.0
+    preference_alignment: float = 0.0
+    workload_balance: float = 0.0
+    evidence_alignment: float = 0.0
+    total: float = 0.0
+
+
+class PlannerThoughtStep(BaseModel):
+    step: Literal["generate", "evaluate", "select"]
+    strategy: str
+    rationale: str
+    score: PlannerCandidateScore | None = None
+
+
+class PlannerCandidateSummary(BaseModel):
+    strategy: str
+    task_count: int
+    event_count: int
+    conflict_count: int
+    score: PlannerCandidateScore
+    assumptions: list[str] = Field(default_factory=list)
 
 
 class PlannerOutput(BaseModel):
@@ -55,6 +85,9 @@ class PlannerOutput(BaseModel):
     reminders: list[ReminderDraft] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
+    selected_strategy: str | None = None
+    planning_candidates: list[PlannerCandidateSummary] = Field(default_factory=list)
+    thought_trace: list[PlannerThoughtStep] = Field(default_factory=list)
 
 
 class SavedPlannerOutput(BaseModel):

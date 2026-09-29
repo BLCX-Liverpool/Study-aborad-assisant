@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tracing import LatencySpan
@@ -108,3 +109,11 @@ class TraceSpanRepository:
         if commit:
             await self.session.commit()
         return len(spans)
+
+    async def list_by_trace_id(self, trace_id: str) -> list[TraceSpan]:
+        result = await self.session.execute(
+            select(TraceSpan)
+            .where(TraceSpan.trace_id == trace_id)
+            .order_by(TraceSpan.started_at.asc(), TraceSpan.created_at.asc())
+        )
+        return list(result.scalars().all())

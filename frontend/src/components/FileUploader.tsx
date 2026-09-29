@@ -5,10 +5,11 @@ import type { UploadedFile } from "../types";
 
 type FileUploaderProps = {
   userId: string;
+  conversationId?: string;
   onUploaded: (file: UploadedFile) => void;
 };
 
-export function FileUploader({ userId, onUploaded }: FileUploaderProps) {
+export function FileUploader({ userId, conversationId, onUploaded }: FileUploaderProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -18,7 +19,7 @@ export function FileUploader({ userId, onUploaded }: FileUploaderProps) {
     setIsUploading(true);
     setError(null);
     try {
-      const uploaded = await uploadFile({ file, userId });
+      const uploaded = await uploadFile({ file, userId, conversationId });
       onUploaded(uploaded);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Upload failed");
@@ -48,4 +49,3 @@ export function FileUploader({ userId, onUploaded }: FileUploaderProps) {
     </div>
   );
 }
-

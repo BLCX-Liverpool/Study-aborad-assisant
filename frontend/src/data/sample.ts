@@ -104,7 +104,42 @@ export const samplePlan: PlannerOutput = {
     }
   ],
   conflicts: [],
-  assumptions: ["Generated default coursework timeline from assignment deadline."]
+  assumptions: ["Generated default coursework timeline from assignment deadline."],
+  selected_strategy: "deadline_safe",
+  planning_candidates: [
+    {
+      strategy: "deadline_safe",
+      task_count: 3,
+      event_count: 0,
+      conflict_count: 0,
+      score: {
+        conflict_penalty: 0,
+        deadline_safety: 8,
+        priority_alignment: 8,
+        preference_alignment: 0,
+        workload_balance: 8,
+        evidence_alignment: 0,
+        total: 24
+      },
+      assumptions: ["Candidate thought: maximize deadline buffer and start important work early."]
+    }
+  ],
+  thought_trace: [
+    {
+      step: "select",
+      strategy: "deadline_safe",
+      rationale: "Selected deadline_safe because it had the highest total score.",
+      score: {
+        conflict_penalty: 0,
+        deadline_safety: 8,
+        priority_alignment: 8,
+        preference_alignment: 0,
+        workload_balance: 8,
+        evidence_alignment: 0,
+        total: 24
+      }
+    }
+  ]
 };
 
 export const sampleNoticeActions: ActionItem[] = [
@@ -261,6 +296,7 @@ export const sampleFitness: FitnessPlanOutput = {
       confirmed: false
     }
   ],
+  memory_confirmation: null,
   missing_information: ["equipment"],
   risk_notes: ["This is general fitness planning support and is not medical advice."],
   assumptions: ["Plan is built from user-provided availability and preferences."],
@@ -300,6 +336,15 @@ export const sampleSocialContent: SocialContentOutput = {
     boundary: "Image generation is a separate approved tool and is not executed by the copywriting agent.",
     expected_inputs: ["approved_copy_draft_id", "platform", "visual_style_reference", "privacy_review_status"]
   },
+  memory_candidates: [
+    {
+      namespace: "social_content",
+      content: "Social content preference: platform xiaohongshu, tone warm, language zh.",
+      requires_confirmation: true,
+      confirmed: false
+    }
+  ],
+  memory_confirmation: null,
   assumptions: ["Current agent generates copy only; image generation must use a separate approved tool."],
   disclaimer: "This is writing support. Review privacy, accuracy, and platform rules before posting."
 };

@@ -51,6 +51,13 @@
       "schema_module": "backend/app/schemas/fitness.py"
     },
     {
+      "name": "tanchengyi-fitness",
+      "path": "tanchengyi-fitness/SKILL.md",
+      "agent_module": "backend/app/agents/fitness",
+      "schema_module": "backend/app/schemas/fitness.py",
+      "source": "https://github.com/Brave-Maker/tanchengyi-fitness"
+    },
+    {
       "name": "social-content-writing",
       "path": "social-content-writing/SKILL.md",
       "agent_module": "backend/app/agents/social_content",

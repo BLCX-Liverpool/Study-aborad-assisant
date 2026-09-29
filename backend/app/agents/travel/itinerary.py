@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, date, datetime, time, timedelta
 
 from app.agents.travel.checklist import TravelChecklistBuilder
@@ -5,7 +6,7 @@ from app.agents.travel.memory import build_travel_memory_candidates
 from app.agents.travel.route_provider import TravelProviderResult, TravelRouteProvider
 from app.schemas.action import ActionItem
 from app.schemas.common import PlannedEvent
-from app.schemas.tools import WeatherForecast
+from app.schemas.tools import WeatherForecast, WeatherLookupRequest, WeatherLookupResponse
 from app.schemas.travel import (
     RouteSuggestion,
     TravelBudgetItem,
@@ -15,6 +16,8 @@ from app.schemas.travel import (
     TravelItineraryRequest,
     TravelPlaceSuggestion,
 )
+from app.tools.models import ToolAvailabilityStatus
+from app.tools.weather import WeatherLookupTool
 
 
 class TravelItineraryGenerator:
@@ -22,14 +25,44 @@ class TravelItineraryGenerator:
         self,
         checklist_builder: TravelChecklistBuilder | None = None,
         route_provider: TravelRouteProvider | None = None,
+        weather_tool: WeatherLookupTool | None = None,
     ) -> None:
         self.checklist_builder = checklist_builder or TravelChecklistBuilder()
         self.route_provider = route_provider or TravelRouteProvider()
+        self.weather_tool = weather_tool or WeatherLookupTool()
 
     def generate(self, request: TravelItineraryRequest) -> TravelItineraryOutput:
+        provider_result = self.route_provider.collect(request)
+        return self._build_output(request, provider_result=provider_result, weather=None)
+
+    async def generate_async(self, request: TravelItineraryRequest) -> TravelItineraryOutput:
+        weather_task = None
+        if request.depart_at is not None and not request.weather_forecasts:
+            weather_task = self.weather_tool.lookup(
+                WeatherLookupRequest(
+                    location=request.destination,
+                    start_date=_ensure_aware(request.depart_at).date(),
+                    days=_weather_days(request),
+                )
+            )
+        provider_task = self.route_provider.collect_async(request)
+        if weather_task is None:
+            provider_result = await provider_task
+            weather = None
+        else:
+            weather, provider_result = await asyncio.gather(weather_task, provider_task)
+            request = request.model_copy(update={"weather_forecasts": weather.forecasts})
+        return self._build_output(request, provider_result=provider_result, weather=weather)
+
+    def _build_output(
+        self,
+        request: TravelItineraryRequest,
+        *,
+        provider_result: TravelProviderResult,
+        weather: WeatherLookupResponse | None,
+    ) -> TravelItineraryOutput:
         trip_dates = _trip_dates(request)
         weather_by_date = {forecast.date: forecast for forecast in request.weather_forecasts if forecast.date}
-        provider_result = self.route_provider.collect(request)
         days = [
             TravelItineraryDay(
                 date=trip_date,
@@ -40,20 +73,23 @@ class TravelItineraryGenerator:
             )
             for index, trip_date in enumerate(trip_dates)
         ]
+        tool_statuses = provider_result.tool_statuses or self.route_provider.statuses()
+        if weather is not None:
+            tool_statuses.append(_weather_status(weather))
 
         return TravelItineraryOutput(
-            summary=_summary(request, days, provider_result),
+            summary=_summary(request, days, provider_result, weather),
             days=days,
             budget_breakdown=_budget_breakdown(request, provider_result.route_suggestions),
             route_suggestions=provider_result.route_suggestions,
             place_suggestions=provider_result.place_suggestions,
-            information_sources=_information_sources(request, provider_result),
-            tool_statuses=provider_result.tool_statuses or self.route_provider.statuses(),
+            information_sources=_information_sources(request, provider_result, weather),
+            tool_statuses=tool_statuses,
             memory_candidates=build_travel_memory_candidates(request),
             planner_items=_planner_items(request, provider_result.route_suggestions),
             checklist=self.checklist_builder.build_tasks(request),
             risk_notes=_risk_notes(request, provider_result),
-            assumptions=_assumptions(request, days, provider_result),
+            assumptions=_assumptions(request, days, provider_result, weather),
             requires_booking_approval=True,
         )
 
@@ -69,6 +105,18 @@ def _trip_dates(request: TravelItineraryRequest) -> list[date]:
         return [start]
     days = min((end - start).days + 1, 14)
     return [start + timedelta(days=offset) for offset in range(days)]
+
+
+def _weather_days(request: TravelItineraryRequest) -> int:
+    if request.depart_at is None:
+        return 1
+    start = _ensure_aware(request.depart_at).date()
+    if request.return_at is None:
+        return 1
+    end = _ensure_aware(request.return_at).date()
+    if end < start:
+        return 1
+    return min((end - start).days + 1, 7)
 
 
 def _day_theme(request: TravelItineraryRequest, index: int, total_days: int) -> str:
@@ -274,6 +322,7 @@ def _assumptions(
     request: TravelItineraryRequest,
     days: list[TravelItineraryDay],
     provider_result: TravelProviderResult,
+    weather: WeatherLookupResponse | None,
 ) -> list[str]:
     assumptions = [
         "No external booking, payment, map, or ticketing tool was called.",
@@ -286,17 +335,27 @@ def _assumptions(
         assumptions.append(f"Unavailable or degraded providers: {', '.join(unavailable)}.")
     if not days:
         assumptions.append("Departure time is missing; itinerary days could not be generated.")
-    if not request.weather_forecasts:
+    if weather is not None and weather.recoverable_error:
+        assumptions.append(f"Weather lookup degraded: {weather.recoverable_error}")
+    if weather is not None and request.return_at is not None and len(days) > 7:
+        assumptions.append("Weather lookup was limited to 7 days by provider request constraints.")
+    if not request.weather_forecasts and weather is None:
         assumptions.append("No weather forecast was provided; call weather.lookup separately if weather is needed.")
     return assumptions
 
 
-def _summary(request: TravelItineraryRequest, days: list[TravelItineraryDay], provider_result: TravelProviderResult) -> str:
+def _summary(
+    request: TravelItineraryRequest,
+    days: list[TravelItineraryDay],
+    provider_result: TravelProviderResult,
+    weather: WeatherLookupResponse | None,
+) -> str:
     if not days:
         return f"Need a departure date before generating a day-by-day itinerary for {request.destination}."
     route_source = "provider-informed" if any(route.source == "provider_verified" for route in provider_result.route_suggestions) else "estimate-based"
     place_source = " with provider places" if provider_result.place_suggestions else ""
-    return f"Generated a {len(days)} day {route_source} student itinerary for {request.destination}{place_source}."
+    weather_source = " and weather lookup" if weather is not None and weather.forecasts else ""
+    return f"Generated a {len(days)} day {route_source} student itinerary for {request.destination}{place_source}{weather_source}."
 
 
 def _day_start(request: TravelItineraryRequest, trip_date: date, index: int) -> datetime:
@@ -352,6 +411,7 @@ def _planner_items(request: TravelItineraryRequest, routes: list[RouteSuggestion
 def _information_sources(
     request: TravelItineraryRequest,
     provider_result: TravelProviderResult,
+    weather: WeatherLookupResponse | None,
 ) -> list[TravelInformationSource]:
     sources = [
         TravelInformationSource(
@@ -382,7 +442,29 @@ def _information_sources(
                 tool_name="travel.maps.places",
             )
         )
+    if weather is not None:
+        sources.append(
+            TravelInformationSource(
+                name="weather",
+                source_type="provider_verified" if weather.forecasts else "unavailable",
+                description=f"Weather source: {weather.source}.",
+                confidence=0.8 if weather.forecasts else 0.0,
+                tool_name="weather.lookup",
+            )
+        )
     return sources
+
+
+def _weather_status(weather: WeatherLookupResponse) -> ToolAvailabilityStatus:
+    return ToolAvailabilityStatus(
+        name="weather.lookup",
+        capability="weather_forecast",
+        available=not bool(weather.recoverable_error),
+        status="available" if not weather.recoverable_error else "degraded",
+        permission_level=WeatherLookupTool.spec.permission_level,
+        recoverable_error=weather.recoverable_error,
+        metadata={"source": weather.source, "forecast_count": len(weather.forecasts)},
+    )
 
 
 def _primary_route(routes: list[RouteSuggestion]) -> RouteSuggestion | None:

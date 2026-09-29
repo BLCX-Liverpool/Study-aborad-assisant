@@ -3,9 +3,14 @@ import type {
   ActionItem,
   EmailDraft,
   FitnessPlanOutput,
+  MemoryDecisionResponse,
+  MemoryReviewResponse,
   MultiIntentExecutionPlan,
   PlannerOutput,
+  ResearchSource,
+  SelectedResearchSourceIndexResponse,
   SocialContentOutput,
+  TraceWaterfallResponse,
   UploadedFile
 } from "../types";
 
@@ -155,6 +160,84 @@ export async function planMultiIntent(body: unknown): Promise<MultiIntentExecuti
 
   if (!response.ok) {
     throw new Error(`Execution planning failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function fetchTraceWaterfall(traceId: string): Promise<TraceWaterfallResponse> {
+  const response = await fetch(`${API_PREFIX}/observability/traces/${encodeURIComponent(traceId)}/waterfall`);
+
+  if (!response.ok) {
+    throw new Error(`Trace lookup failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function fetchMemoryReview(userId: string): Promise<MemoryReviewResponse> {
+  const response = await fetch(`${API_PREFIX}/memory/review?user_id=${encodeURIComponent(userId)}`);
+
+  if (!response.ok) {
+    throw new Error(`Memory review failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function confirmMemoryCandidates(userId: string, memoryIds: string[]): Promise<MemoryDecisionResponse> {
+  return postMemoryDecision("/memory/candidates/confirm", userId, memoryIds, "Memory confirm failed");
+}
+
+export async function rejectMemoryCandidates(userId: string, memoryIds: string[]): Promise<MemoryDecisionResponse> {
+  return postMemoryDecision("/memory/candidates/reject", userId, memoryIds, "Memory reject failed");
+}
+
+export async function deleteMemories(userId: string, memoryIds: string[]): Promise<MemoryDecisionResponse> {
+  return postMemoryDecision("/memory/delete", userId, memoryIds, "Memory delete failed");
+}
+
+export async function indexSelectedArxivSources(params: {
+  userId: string;
+  sources: ResearchSource[];
+  conversationId?: string;
+  traceId?: string;
+}): Promise<SelectedResearchSourceIndexResponse> {
+  const response = await fetch(`${API_PREFIX}/assignment/research/index-selected-arxiv`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: params.userId,
+      sources: params.sources,
+      conversation_id: params.conversationId,
+      trace_id: params.traceId
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`ArXiv indexing failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function postMemoryDecision(
+  path: string,
+  userId: string,
+  memoryIds: string[],
+  errorPrefix: string
+): Promise<MemoryDecisionResponse> {
+  const response = await fetch(`${API_PREFIX}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: userId,
+      memory_ids: memoryIds
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`${errorPrefix}: ${response.status}`);
   }
 
   return response.json();

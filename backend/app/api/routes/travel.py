@@ -49,7 +49,7 @@ async def create_travel_itinerary(
     request: TravelItineraryRequest,
     session: AsyncSession = Depends(get_session),
 ) -> TravelItineraryOutput:
-    output = TravelItineraryGenerator().generate(request)
+    output = await TravelItineraryGenerator().generate_async(request)
     planner_persistence = await TravelPlannerPersistenceService(PlannerRepository(session)).persist_itinerary(
         request=request,
         output=output,

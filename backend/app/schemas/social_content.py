@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.memory import MemoryCandidatePersistResponse
+
 SocialPlatform = Literal["xiaohongshu", "instagram", "wechat_moments", "linkedin", "general"]
 ContentTone = Literal["practical", "warm", "playful", "reflective", "professional"]
 ContentSafetyLevel = Literal["ok", "needs_review", "blocked"]
@@ -19,6 +21,8 @@ class SocialContentRequest(BaseModel):
     draft_count: int = Field(default=3, ge=1, le=5)
     language: Literal["zh", "en", "bilingual"] = "zh"
     notes: str | None = None
+    save_memory_candidates: bool = False
+    memory_confirmed: bool = False
 
 
 class SocialContentDraft(BaseModel):
@@ -52,6 +56,15 @@ class ImageGenerationToolDesign(BaseModel):
     expected_inputs: list[str] = Field(default_factory=list)
 
 
+class SocialMemoryCandidate(BaseModel):
+    namespace: str = "social_content"
+    content: str
+    requires_confirmation: bool = True
+    confirmed: bool = False
+    source_type: str = "social_content_agent"
+    confidence: float = Field(default=0.72, ge=0.0, le=1.0)
+
+
 class SocialContentOutput(BaseModel):
     summary: str
     drafts: list[SocialContentDraft] = Field(default_factory=list)
@@ -59,5 +72,7 @@ class SocialContentOutput(BaseModel):
     platform_standard: PlatformStandard | None = None
     platform_notes: list[str] = Field(default_factory=list)
     image_generation_tool: ImageGenerationToolDesign | None = None
+    memory_candidates: list[SocialMemoryCandidate] = Field(default_factory=list)
+    memory_confirmation: MemoryCandidatePersistResponse | None = None
     assumptions: list[str] = Field(default_factory=list)
     disclaimer: str = "This is writing support. Review privacy, accuracy, and platform rules before posting."

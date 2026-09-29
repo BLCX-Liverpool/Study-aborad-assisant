@@ -1,5 +1,6 @@
 from app.core.permissions import requires_approval
 from app.tools.adapters import ArxivSearchTool, CalendarDraftTool, ReminderDraftTool, WebSearchTool
+from app.tools.finance import FinanceExchangeRateTool
 from app.tools.mcp_adapters import BrowserMcpSearchExtractTool, GoogleMapsDirectionsTool, GoogleMapsPlacesTool
 from app.tools.models import RegisteredTool, ToolAvailabilityStatus, ToolHandler, ToolSpec
 from app.tools.weather import WeatherLookupTool
@@ -50,6 +51,7 @@ def build_default_tool_registry() -> ToolRegistry:
         WebSearchTool(),
         ReminderDraftTool(),
         CalendarDraftTool(),
+        FinanceExchangeRateTool(),
         BrowserMcpSearchExtractTool(),
         GoogleMapsDirectionsTool(),
         GoogleMapsPlacesTool(),

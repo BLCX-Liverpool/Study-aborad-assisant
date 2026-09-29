@@ -2,6 +2,7 @@ import pytest
 
 from app.agents.orchestrator.service import StudyAbroadOrchestrator
 from app.schemas.chat import ChatRequest
+from app.schemas.planner import PlannerOutput
 
 
 @pytest.mark.asyncio
@@ -28,12 +29,13 @@ async def test_orchestrator_calls_travel_with_structured_input() -> None:
             agent_inputs={
                 "travel": {
                     "origin": "London",
-                    "destination": "Manchester",
-                    "purpose": "academic_trip",
-                    "budget_amount": 120,
-                }
-            },
-        )
+                        "destination": "Manchester",
+                        "purpose": "academic_trip",
+                        "budget_amount": 120,
+                        "currency": "GBP",
+                    }
+                },
+            )
     )
 
     assert response.router.primary_intent == "travel"
@@ -78,7 +80,26 @@ async def test_orchestrator_uses_history_for_reference_routing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_notice_action_pipeline() -> None:
+async def test_orchestrator_notice_action_pipeline(monkeypatch) -> None:
+    class FakeTaskPlannerService:
+        async def plan_global(self, request):
+            return PlannerOutput(
+                tasks=[
+                    {
+                        "title": "Pay rent",
+                        "source_type": "bill_due",
+                        "deadline": "2026-10-10T00:00:00Z",
+                        "estimated_minutes": 30,
+                        "priority": "high",
+                        "evidence": [],
+                    }
+                ],
+                assumptions=["Fake LLM-ToT planner output for orchestrator test."],
+                selected_strategy="fake_llm_tot",
+            )
+
+    monkeypatch.setattr("app.agents.orchestrator.workers.TaskPlannerService", FakeTaskPlannerService)
+
     response = await StudyAbroadOrchestrator().handle_chat(
         ChatRequest(
             user_id="user_1",

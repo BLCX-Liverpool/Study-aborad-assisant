@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -14,6 +15,20 @@ MemoryNamespace = Literal[
     "wellbeing",
     "fitness",
     "social",
+    "social_content",
+    "planner",
+    "email",
+    "assignment",
+    "general",
+]
+MemoryCandidateStatus = Literal[
+    "not_requested",
+    "pending_confirmation",
+    "confirmed",
+    "rejected",
+    "deleted",
+    "skipped",
+    "failed",
 ]
 
 
@@ -49,6 +64,9 @@ class LongTermMemoryItem(BaseModel):
     source_type: str | None = None
     source_id: str | None = None
     confidence: float | None = None
+    access_policy: dict | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class MemoryContext(BaseModel):
@@ -58,3 +76,50 @@ class MemoryContext(BaseModel):
     recent_messages: list[ChatTurn] = Field(default_factory=list)
     long_term_memories: list[LongTermMemoryItem] = Field(default_factory=list)
     prompt_context: str = ""
+
+
+class MemoryCandidateInput(BaseModel):
+    namespace: MemoryNamespace | str
+    content: str
+    source_type: str | None = None
+    source_id: str | None = None
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    requires_confirmation: bool = True
+    confirmed: bool = False
+    agent_name: str | None = None
+
+
+class MemoryCandidatePersistRequest(BaseModel):
+    user_id: str
+    candidates: list[MemoryCandidateInput] = Field(default_factory=list)
+    requested: bool = True
+    confirmed: bool = False
+    source_id: str | None = None
+
+
+class MemoryCandidatePersistResponse(BaseModel):
+    status: MemoryCandidateStatus
+    candidate_count: int = 0
+    pending_memory_ids: list[str] = Field(default_factory=list)
+    confirmed_memory_ids: list[str] = Field(default_factory=list)
+    skipped: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class MemoryCandidateDecisionRequest(BaseModel):
+    user_id: str
+    memory_ids: list[str] = Field(default_factory=list)
+
+
+class MemoryCandidateDecisionResponse(BaseModel):
+    status: MemoryCandidateStatus
+    memory_ids: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class MemoryReviewResponse(BaseModel):
+    user_id: str
+    memories: list[LongTermMemoryItem] = Field(default_factory=list)
+    candidates: list[LongTermMemoryItem] = Field(default_factory=list)
