@@ -2,7 +2,7 @@ import { Activity, Dumbbell, ShieldAlert } from "lucide-react";
 import type { FitnessPlanOutput } from "../types";
 
 type FitnessPlanPanelProps = {
-  plan: FitnessPlanOutput;
+  plan?: FitnessPlanOutput | null;
 };
 
 export function FitnessPlanPanel({ plan }: FitnessPlanPanelProps) {
@@ -13,6 +13,12 @@ export function FitnessPlanPanel({ plan }: FitnessPlanPanelProps) {
         <h2>Fitness Plan</h2>
       </div>
 
+      {!plan ? (
+        <p className="module-hint">提出健身、作息或压力管理目标后，这里会生成训练日安排、习惯任务和安全提示。</p>
+      ) : null}
+
+      {plan ? (
+        <>
       <p className="objective">{plan.summary}</p>
 
       <div className="workout-grid">
@@ -65,6 +71,8 @@ export function FitnessPlanPanel({ plan }: FitnessPlanPanelProps) {
           <ShieldAlert size={16} />
           <span>{plan.risk_notes[0]}</span>
         </div>
+      ) : null}
+        </>
       ) : null}
     </section>
   );

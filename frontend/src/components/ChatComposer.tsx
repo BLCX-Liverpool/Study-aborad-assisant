@@ -24,8 +24,12 @@ export function ChatComposer({ value, onChange, onRun, loading = false, response
         value={value}
         onChange={(event) => onChange(event.target.value)}
         aria-label="Message"
+        placeholder="输入你要处理的留学任务，例如分析 coursework、规划申请材料、起草邮件或整理待办。"
       />
-      <button className="primary-button" type="button" onClick={onRun} disabled={loading}>
+      {!response && !value.trim() ? (
+        <p className="module-hint">先输入任务，再本地运行；结果会同步到右侧和中间的各个模块。</p>
+      ) : null}
+      <button className="primary-button" type="button" onClick={onRun} disabled={loading || !value.trim()}>
         {loading ? <Loader2 className="spin" size={16} /> : <CornerDownLeft size={16} />}
         Run locally
       </button>

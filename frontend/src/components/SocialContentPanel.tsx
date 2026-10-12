@@ -2,11 +2,11 @@ import { CopyCheck, ShieldCheck } from "lucide-react";
 import type { SocialContentOutput } from "../types";
 
 type SocialContentPanelProps = {
-  content: SocialContentOutput;
+  content?: SocialContentOutput | null;
 };
 
 export function SocialContentPanel({ content }: SocialContentPanelProps) {
-  const draft = content.drafts[0];
+  const draft = content?.drafts[0];
 
   return (
     <section className="panel social-panel">
@@ -15,6 +15,12 @@ export function SocialContentPanel({ content }: SocialContentPanelProps) {
         <h2>Social Content</h2>
       </div>
 
+      {!content ? (
+        <p className="module-hint">需要整理留学经验、申请记录或生活分享时，这里会生成平台适配的文案草稿。</p>
+      ) : null}
+
+      {content ? (
+        <>
       <div className="email-meta">
         <span>{draft?.platform ?? "platform"}</span>
         <span>{draft?.variant ?? "variant"}</span>
@@ -50,6 +56,8 @@ export function SocialContentPanel({ content }: SocialContentPanelProps) {
         <ShieldCheck size={16} />
         <span>{content.image_generation_tool?.boundary ?? content.disclaimer}</span>
       </div>
+        </>
+      ) : null}
     </section>
   );
 }

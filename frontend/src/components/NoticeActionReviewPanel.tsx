@@ -13,8 +13,9 @@ export function NoticeActionReviewPanel({ actions }: NoticeActionReviewPanelProp
         <h2>Notice Review</h2>
       </div>
 
-      <div className="review-list">
-        {actions.map((action) => (
+      {actions.length ? (
+        <div className="review-list">
+          {actions.map((action) => (
           <article className="mini-card" key={`${action.action_type}-${action.title}`}>
             <div className="mini-card-header">
               <span>{action.action_type}</span>
@@ -27,8 +28,11 @@ export function NoticeActionReviewPanel({ actions }: NoticeActionReviewPanelProp
               <blockquote>{action.evidence[0].quote}</blockquote>
             ) : null}
           </article>
-        ))}
-      </div>
+          ))}
+        </div>
+      ) : (
+        <p className="module-hint">运行任务后，这里会提取通知、邮件或文件中的 deadline、待办事项和需要审批的动作。</p>
+      )}
     </section>
   );
 }

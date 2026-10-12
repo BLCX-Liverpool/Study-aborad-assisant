@@ -2,7 +2,7 @@ import { Mail, ShieldCheck } from "lucide-react";
 import type { EmailDraft } from "../types";
 
 type EmailDraftCardProps = {
-  draft: EmailDraft;
+  draft?: EmailDraft | null;
 };
 
 export function EmailDraftCard({ draft }: EmailDraftCardProps) {
@@ -12,6 +12,11 @@ export function EmailDraftCard({ draft }: EmailDraftCardProps) {
         <Mail size={18} />
         <h2>Email Draft</h2>
       </div>
+      {!draft ? (
+        <p className="module-hint">当任务需要联系教授、房东、学校部门或服务方时，这里会生成待你确认的邮件草稿。</p>
+      ) : null}
+      {draft ? (
+        <>
       <div className="email-meta">
         <span>{draft.recipient_type}</span>
         <span>{draft.tone}</span>
@@ -27,7 +32,8 @@ export function EmailDraftCard({ draft }: EmailDraftCardProps) {
         <ShieldCheck size={16} />
         <span>{draft.requires_user_approval ? "User approval required before sending" : "Draft only"}</span>
       </div>
+        </>
+      ) : null}
     </section>
   );
 }
-

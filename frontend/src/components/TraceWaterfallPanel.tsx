@@ -41,6 +41,9 @@ export function TraceWaterfallPanel({
       </div>
 
       {error ? <p className="error-text">{error}</p> : null}
+      {!traceId.trim() && !waterfall ? (
+        <p className="module-hint">运行任务后会自动填入 trace id；也可以手动输入 trace id 查看调用耗时瀑布图。</p>
+      ) : null}
 
       {waterfall?.found && waterfall.summary ? (
         <>

@@ -2,7 +2,7 @@ import { GitBranch } from "lucide-react";
 import type { MultiIntentExecutionPlan } from "../types";
 
 type ExecutionPlanPanelProps = {
-  plan: MultiIntentExecutionPlan;
+  plan?: MultiIntentExecutionPlan | null;
 };
 
 export function ExecutionPlanPanel({ plan }: ExecutionPlanPanelProps) {
@@ -13,6 +13,12 @@ export function ExecutionPlanPanel({ plan }: ExecutionPlanPanelProps) {
         <h2>Execution Plan</h2>
       </div>
 
+      {!plan ? (
+        <p className="module-hint">任务包含多个意图时，这里会展示执行顺序、依赖关系和每一步状态。</p>
+      ) : null}
+
+      {plan ? (
+        <>
       <p className="objective">{plan.summary}</p>
       <div className="review-list">
         {plan.steps.map((step) => (
@@ -37,6 +43,8 @@ export function ExecutionPlanPanel({ plan }: ExecutionPlanPanelProps) {
             </div>
           ))}
         </div>
+      ) : null}
+        </>
       ) : null}
     </section>
   );

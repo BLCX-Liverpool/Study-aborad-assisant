@@ -19,8 +19,9 @@ export function AgentTracePanel({ trace }: AgentTracePanelProps) {
         <CheckCircle2 size={18} />
         <h2>Agent Trace</h2>
       </div>
-      <ol className="trace-list">
-        {trace.map((step) => {
+      {trace.length ? (
+        <ol className="trace-list">
+          {trace.map((step) => {
           const Icon = icons[step.status];
           return (
             <li key={step.name}>
@@ -31,9 +32,11 @@ export function AgentTracePanel({ trace }: AgentTracePanelProps) {
               </div>
             </li>
           );
-        })}
-      </ol>
+          })}
+        </ol>
+      ) : (
+        <p className="module-hint">运行任务后，这里会显示路由器和各个智能体的执行步骤。</p>
+      )}
     </section>
   );
 }
-

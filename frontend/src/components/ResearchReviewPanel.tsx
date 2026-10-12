@@ -9,7 +9,7 @@ import type {
 
 type ResearchReviewPanelProps = {
   sources: ResearchSource[];
-  verification: IdeaVerificationResponse;
+  verification?: IdeaVerificationResponse | null;
   arxivCandidates?: ArxivSourceCandidates | null;
   indexingResult?: SelectedResearchSourceIndexResponse | null;
   indexingLoading?: boolean;
@@ -26,7 +26,7 @@ export function ResearchReviewPanel({
   indexingError,
   onIndexSelected
 }: ResearchReviewPanelProps) {
-  const firstFinding = verification.findings[0];
+  const firstFinding = verification?.findings[0];
   const candidates = arxivCandidates?.sources ?? [];
   const [selectedUrls, setSelectedUrls] = useState<Set<string>>(new Set());
   const selectedSources = useMemo(
@@ -53,10 +53,16 @@ export function ResearchReviewPanel({
         <h2>Research Review</h2>
       </div>
 
-      <div className="email-meta">
-        <span>{sources.length} sources</span>
-        <span>{verification.recommended_ideas.length} recommended</span>
-      </div>
+      {!sources.length && !firstFinding && !candidates.length ? (
+        <p className="module-hint">当任务涉及选题、论文或资料检索时，这里会展示研究来源、候选文献和选题验证结果。</p>
+      ) : null}
+
+      {sources.length || verification?.recommended_ideas.length ? (
+        <div className="email-meta">
+          <span>{sources.length} sources</span>
+          <span>{verification?.recommended_ideas.length ?? 0} recommended</span>
+        </div>
+      ) : null}
 
       {candidates.length ? (
         <div className="research-candidates">

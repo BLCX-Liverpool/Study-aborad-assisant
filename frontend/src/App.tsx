@@ -1,23 +1,22 @@
 import { useMemo, useState } from "react";
 import {
-  AlertCircle,
-  Brain,
-  CalendarClock,
-  CheckCircle2,
-  Dumbbell,
+  Bot,
+  Bug,
+  ChevronRight,
   FileText,
+  Loader2,
   MessageSquareText,
+  PanelRightClose,
   Send,
+  Sparkles,
   SquarePen,
-  Upload,
-  Workflow
+  UserRound
 } from "lucide-react";
 import { AssignmentSummary } from "./components/AssignmentSummary";
 import { TaskTimeline } from "./components/TaskTimeline";
 import { EmailDraftCard } from "./components/EmailDraftCard";
 import { ExecutionPlanPanel } from "./components/ExecutionPlanPanel";
 import { AgentTracePanel } from "./components/AgentTracePanel";
-import { ChatComposer } from "./components/ChatComposer";
 import { FileUploader } from "./components/FileUploader";
 import { FitnessPlanPanel } from "./components/FitnessPlanPanel";
 import { MemoryReviewPanel } from "./components/MemoryReviewPanel";
@@ -26,23 +25,11 @@ import { ResearchReviewPanel } from "./components/ResearchReviewPanel";
 import { SocialContentPanel } from "./components/SocialContentPanel";
 import { TraceWaterfallPanel } from "./components/TraceWaterfallPanel";
 import {
-  sampleAssignment,
-  sampleEmail,
-  sampleFitness,
-  sampleIdeaVerification,
-  sampleNoticeActions,
-  samplePlan,
-  sampleResearchSources,
-  sampleSocialContent,
-  sampleTrace
-} from "./data/sample";
-import {
   confirmMemoryCandidates,
   deleteMemories,
   fetchMemoryReview,
   fetchTraceWaterfall,
   indexSelectedArxivSources,
-  planMultiIntent,
   rejectMemoryCandidates,
   sendChatMessage
 } from "./lib/api";
@@ -66,13 +53,22 @@ import type {
 } from "./types";
 
 const userId = "local_user";
-const defaultMessage = "帮我分析 coursework，并安排完成计划。";
+
+type ConversationMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+  response?: ChatApiResponse;
+  uploadedFile?: UploadedFile | null;
+};
 
 type ConversationSession = {
   id: string;
   title: string;
   activeMessage: string;
   uploadedFile: UploadedFile | null;
+  messages: ConversationMessage[];
   chatResponse: ChatApiResponse | null;
   traceQuery: string;
   traceWaterfall: TraceWaterfallResponse | null;
@@ -86,9 +82,6 @@ export function App() {
   const [activeConversationId, setActiveConversationId] = useState(initialConversation.id);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
-  const [executionPlan, setExecutionPlan] = useState<MultiIntentExecutionPlan | null>(null);
-  const [workflowLoading, setWorkflowLoading] = useState(false);
-  const [workflowError, setWorkflowError] = useState<string | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
   const [traceError, setTraceError] = useState<string | null>(null);
   const [memoryReview, setMemoryReview] = useState<MemoryReviewResponse | null>(null);
@@ -97,55 +90,37 @@ export function App() {
   const [memoryAction, setMemoryAction] = useState<MemoryDecisionResponse | null>(null);
   const [researchIndexingLoading, setResearchIndexingLoading] = useState(false);
   const [researchIndexingError, setResearchIndexingError] = useState<string | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
 
   const activeSession = sessions.find((session) => session.id === activeConversationId) ?? sessions[0];
-  const uploadedFile = activeSession.uploadedFile;
   const activeMessage = activeSession.activeMessage;
   const chatResponse = activeSession.chatResponse;
   const traceQuery = activeSession.traceQuery;
   const traceWaterfall = activeSession.traceWaterfall;
   const researchIndexingResult = activeSession.researchIndexingResult;
+  const latestAssistantResponse = latestResponse(activeSession);
+  const detailResponse = latestAssistantResponse ?? chatResponse;
+  const detailTrace = traceFromResponse(detailResponse);
 
-  const liveAssignment = artifactPayload<{ analysis: AssignmentAnalysis }>(chatResponse, "assignment_analysis")?.analysis ?? sampleAssignment;
-  const liveNoticeActions = artifactPayload<{ action_items: ActionItem[] }>(chatResponse, "notice_parse")?.action_items ?? sampleNoticeActions;
-  const livePlanner = artifactPayload<PlannerOutput>(chatResponse, "planner_output") ?? samplePlan;
-  const liveFitness = artifactPayload<FitnessPlanOutput>(chatResponse, "fitness_plan") ?? sampleFitness;
-  const liveSocial = artifactPayload<SocialContentOutput>(chatResponse, "social_content") ?? sampleSocialContent;
-  const arxivCandidates = artifactPayload<ArxivSourceCandidates>(chatResponse, "arxiv_source_candidates");
-  const liveEmail = artifactPayload<{ draft?: EmailDraft } | EmailDraft>(chatResponse, "email_draft");
-  const emailDraft = isEmailDraft(liveEmail) ? liveEmail : liveEmail?.draft ?? sampleEmail;
-  const liveExecution = artifactPayload<MultiIntentExecutionPlan>(chatResponse, "multi_intent_execution") ?? executionPlan;
-  const liveTrace: TraceStep[] = chatResponse?.trace?.length
-    ? chatResponse.trace.map((step) => ({
-        name: step.name,
-        detail: JSON.stringify(step.payload),
-        status: "done"
-      }))
-    : sampleTrace;
-
-  const statusItems = useMemo(
-    () => [
-      { label: "Upload", value: uploadedFile ? "Ready" : "Optional", icon: Upload },
-      { label: "Assignment", value: chatResponse ? "Live linked" : "Sample loaded", icon: FileText },
-      { label: "Planner", value: `${livePlanner.tasks.length} tasks`, icon: CalendarClock },
-      { label: "Fitness", value: `${liveFitness.workout_days.length} days`, icon: Dumbbell },
-      { label: "Social", value: `${liveSocial.drafts.length} drafts`, icon: SquarePen },
-      { label: "Memory", value: `${memoryReview?.candidates.length ?? 0} pending`, icon: Brain }
-    ],
-    [
-      uploadedFile,
-      chatResponse,
-      livePlanner.tasks.length,
-      liveFitness.workout_days.length,
-      liveSocial.drafts.length,
-      memoryReview?.candidates.length
-    ]
-  );
+  const detailSummary = useMemo(() => {
+    if (!detailResponse) {
+      return { agents: 0, artifacts: 0, trace: "Waiting" };
+    }
+    return {
+      agents: detailResponse.trace.length,
+      artifacts: detailResponse.artifacts.length,
+      trace: detailResponse.trace_id || "No trace"
+    };
+  }, [detailResponse]);
 
   function updateSession(sessionId: string, patch: Partial<ConversationSession>) {
     setSessions((current) =>
       current.map((session) => (session.id === sessionId ? { ...session, ...patch } : session))
     );
+  }
+
+  function patchSession(sessionId: string, updater: (session: ConversationSession) => ConversationSession) {
+    setSessions((current) => current.map((session) => (session.id === sessionId ? updater(session) : session)));
   }
 
   function updateActiveSession(patch: Partial<ConversationSession>) {
@@ -157,19 +132,37 @@ export function App() {
     setSessions((current) => [session, ...current]);
     setActiveConversationId(session.id);
     setChatError(null);
-    setWorkflowError(null);
     setTraceError(null);
     setResearchIndexingError(null);
   }
 
   async function runChat() {
     const session = activeSession;
+    const message = session.activeMessage.trim();
+    if (!message || chatLoading) {
+      return;
+    }
+
+    const userMessage: ConversationMessage = {
+      id: createMessageId("user"),
+      role: "user",
+      content: message,
+      createdAt: new Date().toISOString(),
+      uploadedFile: session.uploadedFile
+    };
+
+    patchSession(session.id, (current) => ({
+      ...current,
+      activeMessage: "",
+      messages: [...current.messages, userMessage]
+    }));
     setChatLoading(true);
     setChatError(null);
+
     try {
       const response = await sendChatMessage({
         userId,
-        message: session.activeMessage,
+        message,
         conversationId: session.id,
         agentInputs: session.uploadedFile
           ? {
@@ -182,39 +175,34 @@ export function App() {
             }
           : {}
       });
-      updateSession(session.id, {
+
+      const assistantMessage: ConversationMessage = {
+        id: createMessageId("assistant"),
+        role: "assistant",
+        content: response.final_response,
+        createdAt: new Date().toISOString(),
+        response
+      };
+
+      patchSession(session.id, (current) => ({
+        ...current,
         chatResponse: response,
-        title: deriveSessionTitle(session, response.final_response),
+        messages: [...current.messages, assistantMessage],
+        title: deriveSessionTitle(current, response.final_response, message),
         traceQuery: response.trace_id,
+        traceWaterfall: null,
         researchIndexingResult: null
-      });
-      const execution = artifactPayload<MultiIntentExecutionPlan>(response, "multi_intent_execution");
-      if (execution) {
-        setExecutionPlan(execution);
-      }
+      }));
       await loadTraceWaterfall(response.trace_id, session.id);
       await loadMemoryReview();
     } catch (error) {
       setChatError(error instanceof Error ? error.message : "Chat request failed");
+      patchSession(session.id, (current) => ({
+        ...current,
+        activeMessage: message
+      }));
     } finally {
       setChatLoading(false);
-    }
-  }
-
-  async function runExecutionPlan() {
-    setWorkflowLoading(true);
-    setWorkflowError(null);
-    try {
-      const plan = await planMultiIntent({
-        user_id: userId,
-        message: activeSession.activeMessage,
-        structured_intents: activeSession.chatResponse?.router?.structured_intents ?? []
-      });
-      setExecutionPlan(plan);
-    } catch (error) {
-      setWorkflowError(error instanceof Error ? error.message : "Execution planning failed");
-    } finally {
-      setWorkflowLoading(false);
     }
   }
 
@@ -227,7 +215,7 @@ export function App() {
     setTraceError(null);
     try {
       const waterfall = await fetchTraceWaterfall(normalized);
-      updateSession(sessionId, { traceWaterfall: waterfall, traceQuery: normalized });
+      patchSession(sessionId, (current) => ({ ...current, traceWaterfall: waterfall, traceQuery: normalized }));
     } catch (error) {
       setTraceError(error instanceof Error ? error.message : "Trace lookup failed");
     } finally {
@@ -273,7 +261,7 @@ export function App() {
         conversationId: session.id,
         traceId: session.chatResponse?.trace_id
       });
-      updateSession(session.id, { researchIndexingResult: result });
+      patchSession(session.id, (current) => ({ ...current, researchIndexingResult: result }));
     } catch (error) {
       setResearchIndexingError(error instanceof Error ? error.message : "ArXiv indexing failed");
     } finally {
@@ -282,132 +270,165 @@ export function App() {
   }
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Study Abroad Assistant</p>
-          <h1>Academic planning workspace</h1>
+    <main className="chat-app-shell">
+      <aside className="chat-sidebar" aria-label="Conversations">
+        <div className="sidebar-brand">
+          <div className="brand-mark">
+            <Sparkles size={18} />
+          </div>
+          <div>
+            <p>Study Abroad</p>
+            <strong>Life Assistant</strong>
+          </div>
         </div>
-        <div className="topbar-actions">
-          <span className="status-pill">
-            <CheckCircle2 size={16} />
-            Phase 12 enhanced
-          </span>
-        </div>
-      </header>
 
-      <section className="status-grid" aria-label="Workflow status">
-        {statusItems.map((item) => (
-          <div className="status-tile" key={item.label}>
-            <item.icon size={18} />
-            <div>
-              <span>{item.label}</span>
-              <strong>{item.value}</strong>
-            </div>
-          </div>
-        ))}
-      </section>
+        <button className="new-chat-button" type="button" onClick={startNewConversation}>
+          <SquarePen size={16} />
+          New chat
+        </button>
 
-      <section className="workspace-grid">
-        <aside className="left-pane" aria-label="Input workspace">
-          <div className="panel conversation-panel">
-            <div className="panel-heading action-heading">
-              <MessageSquareText size={18} />
-              <h2>Conversations</h2>
-              <button className="icon-button" type="button" onClick={startNewConversation} title="New conversation">
-                <SquarePen size={16} />
-              </button>
-            </div>
-            <div className="conversation-list" aria-label="Conversation list">
-              {sessions.map((session) => (
-                <button
-                  className={session.id === activeSession.id ? "conversation-item active" : "conversation-item"}
-                  key={session.id}
-                  type="button"
-                  onClick={() => {
-                    setActiveConversationId(session.id);
-                    setChatError(null);
-                    setWorkflowError(null);
-                    setTraceError(null);
-                    setResearchIndexingError(null);
-                  }}
-                >
-                  <span>{session.title}</span>
-                  <small>{session.id}</small>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panel-heading">
-              <MessageSquareText size={18} />
-              <h2>Chat</h2>
-            </div>
-            <ChatComposer
-              value={activeMessage}
-              onChange={(value) => updateActiveSession({ activeMessage: value })}
-              onRun={runChat}
-              loading={chatLoading}
-              response={chatResponse}
-              error={chatError}
-            />
-          </div>
-
-          <div className="panel">
-            <div className="panel-heading">
-              <Upload size={18} />
-              <h2>Upload</h2>
-            </div>
-            <FileUploader
-              userId={userId}
-              conversationId={activeSession.id}
-              onUploaded={(file) => updateActiveSession({ uploadedFile: file })}
-            />
-            {uploadedFile ? (
-              <div className="uploaded-file">
-                <FileText size={16} />
-                <span>{uploadedFile.filename}</span>
-              </div>
-            ) : null}
-          </div>
-
-          <div className="panel">
-            <div className="panel-heading">
-              <Workflow size={18} />
-              <h2>Workflow</h2>
-            </div>
-            <button className="secondary-button" type="button" onClick={runExecutionPlan} disabled={workflowLoading}>
-              <Workflow size={16} />
-              {workflowLoading ? "Planning..." : "Plan execution"}
+        <div className="sidebar-section-label">Conversations</div>
+        <div className="chat-session-list">
+          {sessions.map((session) => (
+            <button
+              className={session.id === activeSession.id ? "chat-session-item active" : "chat-session-item"}
+              key={session.id}
+              type="button"
+              onClick={() => {
+                setActiveConversationId(session.id);
+                setChatError(null);
+                setTraceError(null);
+                setResearchIndexingError(null);
+              }}
+            >
+              <MessageSquareText size={15} />
+              <span>{session.title}</span>
             </button>
-            {workflowError ? <p className="error-text">{workflowError}</p> : null}
-          </div>
-        </aside>
+          ))}
+        </div>
 
-        <section className="main-pane" aria-label="Analysis workspace">
-          <AssignmentSummary assignment={liveAssignment} />
-          <NoticeActionReviewPanel actions={liveNoticeActions} />
-          {liveExecution ? <ExecutionPlanPanel plan={liveExecution} /> : null}
-          <ResearchReviewPanel
-            sources={sampleResearchSources}
-            verification={sampleIdeaVerification}
-            arxivCandidates={arxivCandidates}
-            indexingResult={researchIndexingResult}
-            indexingLoading={researchIndexingLoading}
-            indexingError={researchIndexingError}
-            onIndexSelected={runIndexSelectedArxivSources}
-          />
-          <TaskTimeline plan={livePlanner} />
-          <FitnessPlanPanel plan={liveFitness} />
+        <div className="sidebar-footer">
+          <button className="detail-entry-button" type="button" onClick={() => setDetailOpen(true)}>
+            <Bug size={15} />
+            <span>Detail</span>
+            <ChevronRight size={14} />
+          </button>
+          <div className="detail-meta">
+            <span>{detailSummary.agents} calls</span>
+            <span>{detailSummary.artifacts} artifacts</span>
+          </div>
+        </div>
+      </aside>
+
+      <section className="chat-main" aria-label="Chat workspace">
+        <header className="chat-main-header">
+          <div>
+            <p className="eyebrow">Unified assistant</p>
+            <h1>{activeSession.title}</h1>
+          </div>
+          <button className="subtle-button" type="button" onClick={() => setDetailOpen(true)}>
+            <Bug size={15} />
+            Detail
+          </button>
+        </header>
+
+        <section className="message-scroll" aria-label="Messages">
+          {activeSession.messages.length ? (
+            activeSession.messages.map((message) => (
+              <ChatMessageBubble
+                key={message.id}
+                message={message}
+                indexingResult={researchIndexingResult}
+                indexingLoading={researchIndexingLoading}
+                indexingError={researchIndexingError}
+                onIndexSelected={runIndexSelectedArxivSources}
+              />
+            ))
+          ) : (
+            <div className="empty-chat-state">
+              <div className="empty-chat-icon">
+                <Bot size={28} />
+              </div>
+              <h2>What can I help you handle today?</h2>
+              <p>Ask about coursework, applications, email drafting, budgeting, travel, wellbeing, or fitness. Results will appear here as one conversation.</p>
+            </div>
+          )}
+          {chatLoading ? (
+            <div className="message-row assistant">
+              <div className="message-avatar">
+                <Bot size={17} />
+              </div>
+              <div className="message-bubble loading-bubble">
+                <Loader2 className="spin" size={16} />
+                <span>Analyzing and routing your task...</span>
+              </div>
+            </div>
+          ) : null}
         </section>
 
-        <aside className="right-pane" aria-label="Agent trace and email workspace">
-          <AgentTracePanel trace={liveTrace} />
+        <section className="composer-shell" aria-label="Message composer">
+          {activeSession.uploadedFile ? (
+            <div className="composer-file-chip">
+              <FileText size={14} />
+              <span>{activeSession.uploadedFile.filename}</span>
+            </div>
+          ) : null}
+          {chatError ? <p className="error-text">{chatError}</p> : null}
+          <div className="composer-box">
+            <textarea
+              aria-label="Message"
+              value={activeMessage}
+              onChange={(event) => updateActiveSession({ activeMessage: event.target.value })}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                  void runChat();
+                }
+              }}
+              placeholder="Message Study Abroad Assistant..."
+            />
+            <div className="composer-actions">
+              <FileUploader
+                userId={userId}
+                conversationId={activeSession.id}
+                onUploaded={(file) => updateActiveSession({ uploadedFile: file })}
+              />
+              <button className="send-button" type="button" onClick={() => void runChat()} disabled={chatLoading || !activeMessage.trim()}>
+                {chatLoading ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
+              </button>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      {detailOpen ? (
+        <aside className="detail-drawer" aria-label="Detail">
+          <div className="detail-drawer-header">
+            <div>
+              <p className="eyebrow">Developer detail</p>
+              <h2>Detail</h2>
+            </div>
+            <button className="icon-button" type="button" onClick={() => setDetailOpen(false)} aria-label="Close detail">
+              <PanelRightClose size={17} />
+            </button>
+          </div>
+
+          <div className="detail-summary-grid">
+            <div>
+              <span>Agent calls</span>
+              <strong>{detailSummary.agents}</strong>
+            </div>
+            <div>
+              <span>Artifacts</span>
+              <strong>{detailSummary.artifacts}</strong>
+            </div>
+          </div>
+          <p className="detail-trace-id">{detailSummary.trace}</p>
+
+          <AgentTracePanel trace={detailTrace} />
           <TraceWaterfallPanel
-            traceId={traceQuery || chatResponse?.trace_id || ""}
+            traceId={traceQuery || detailResponse?.trace_id || ""}
             onTraceIdChange={(value) => updateActiveSession({ traceQuery: value })}
-            onLookup={() => loadTraceWaterfall()}
+            onLookup={() => void loadTraceWaterfall()}
             loading={traceLoading}
             error={traceError}
             waterfall={traceWaterfall}
@@ -422,30 +443,172 @@ export function App() {
             onReject={(memoryId) => runMemoryAction(rejectMemoryCandidates, memoryId)}
             onDelete={(memoryId) => runMemoryAction(deleteMemories, memoryId)}
           />
-          <EmailDraftCard draft={emailDraft} />
-          <SocialContentPanel content={liveSocial} />
-          <div className="panel notice-panel">
-            <div className="panel-heading">
-              <AlertCircle size={18} />
-              <h2>Approval Gate</h2>
-            </div>
-            <p>
-              Email sending, deletion, payment, and real calendar writes require explicit user
-              approval. This MVP only prepares local drafts and plans.
-            </p>
-            <button className="secondary-button" type="button">
-              <Send size={16} />
-              Send disabled
-            </button>
-          </div>
+          <ArtifactDetail response={detailResponse} />
         </aside>
-      </section>
-
-      <footer className="footer-line">
-        <Workflow size={16} />
-        <span>{activeMessage}</span>
-      </footer>
+      ) : null}
     </main>
+  );
+}
+
+function ChatMessageBubble({
+  message,
+  indexingResult,
+  indexingLoading,
+  indexingError,
+  onIndexSelected
+}: {
+  message: ConversationMessage;
+  indexingResult: SelectedResearchSourceIndexResponse | null;
+  indexingLoading: boolean;
+  indexingError: string | null;
+  onIndexSelected: (sources: ResearchSource[]) => void;
+}) {
+  const isAssistant = message.role === "assistant";
+
+  return (
+    <article className={isAssistant ? "message-row assistant" : "message-row user"}>
+      <div className="message-avatar">
+        {isAssistant ? <Bot size={17} /> : <UserRound size={17} />}
+      </div>
+      <div className="message-content">
+        <div className="message-bubble">
+          {message.uploadedFile ? (
+            <div className="message-file-note">
+              <FileText size={14} />
+              <span>{message.uploadedFile.filename}</span>
+            </div>
+          ) : null}
+          <p>{message.content}</p>
+        </div>
+        {message.response ? (
+          <AssistantResultCards
+            response={message.response}
+            indexingResult={indexingResult}
+            indexingLoading={indexingLoading}
+            indexingError={indexingError}
+            onIndexSelected={onIndexSelected}
+          />
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
+function AssistantResultCards({
+  response,
+  indexingResult,
+  indexingLoading,
+  indexingError,
+  onIndexSelected
+}: {
+  response: ChatApiResponse;
+  indexingResult: SelectedResearchSourceIndexResponse | null;
+  indexingLoading: boolean;
+  indexingError: string | null;
+  onIndexSelected: (sources: ResearchSource[]) => void;
+}) {
+  const assignment = artifactPayload<{ analysis: AssignmentAnalysis }>(response, "assignment_analysis")?.analysis ?? null;
+  const noticeActions = artifactPayload<{ action_items: ActionItem[] }>(response, "notice_parse")?.action_items ?? [];
+  const planner = artifactPayload<PlannerOutput>(response, "planner_output") ?? null;
+  const execution = artifactPayload<MultiIntentExecutionPlan>(response, "multi_intent_execution") ?? null;
+  const fitness = artifactPayload<FitnessPlanOutput>(response, "fitness_plan") ?? null;
+  const social = artifactPayload<SocialContentOutput>(response, "social_content") ?? null;
+  const arxivCandidates = artifactPayload<ArxivSourceCandidates>(response, "arxiv_source_candidates");
+  const liveEmail = artifactPayload<{ draft?: EmailDraft } | EmailDraft>(response, "email_draft");
+  const emailDraft = isEmailDraft(liveEmail) ? liveEmail : liveEmail?.draft ?? null;
+  const hasCards = Boolean(
+    assignment ||
+      noticeActions.length ||
+      planner ||
+      execution ||
+      fitness ||
+      social ||
+      arxivCandidates ||
+      emailDraft ||
+      response.missing_information.length ||
+      response.next_actions.length
+  );
+
+  if (!hasCards) {
+    return null;
+  }
+
+  return (
+    <div className="assistant-result-stack">
+      {response.missing_information.length ? (
+        <div className="inline-result-card">
+          <strong>Needs clarification</strong>
+          <ul>
+            {response.missing_information.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {assignment ? <AssignmentSummary assignment={assignment} /> : null}
+      {noticeActions.length ? <NoticeActionReviewPanel actions={noticeActions} /> : null}
+      {execution ? <ExecutionPlanPanel plan={execution} /> : null}
+      {arxivCandidates ? (
+        <ResearchReviewPanel
+          sources={[]}
+          arxivCandidates={arxivCandidates}
+          indexingResult={indexingResult}
+          indexingLoading={indexingLoading}
+          indexingError={indexingError}
+          onIndexSelected={onIndexSelected}
+        />
+      ) : null}
+      {planner ? <TaskTimeline plan={planner} /> : null}
+      {fitness ? <FitnessPlanPanel plan={fitness} /> : null}
+      {emailDraft ? <EmailDraftCard draft={emailDraft} /> : null}
+      {social ? <SocialContentPanel content={social} /> : null}
+      {response.next_actions.length ? (
+        <div className="inline-result-card">
+          <strong>Next actions</strong>
+          <ul>
+            {response.next_actions.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ArtifactDetail({ response }: { response?: ChatApiResponse | null }) {
+  if (!response) {
+    return (
+      <section className="panel detail-json-panel">
+        <div className="panel-heading">
+          <Bug size={18} />
+          <h2>Artifacts</h2>
+        </div>
+        <p className="module-hint">Run a task to inspect raw artifacts and router output.</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="panel detail-json-panel">
+      <div className="panel-heading">
+        <Bug size={18} />
+        <h2>Artifacts</h2>
+      </div>
+      <div className="artifact-kind-list">
+        {response.artifacts.map((artifact) => (
+          <span key={`${artifact.kind}-${artifact.name}`}>{artifact.kind}</span>
+        ))}
+      </div>
+      <details>
+        <summary>Router output</summary>
+        <pre>{JSON.stringify(response.router, null, 2)}</pre>
+      </details>
+      <details>
+        <summary>Raw artifacts</summary>
+        <pre>{JSON.stringify(response.artifacts, null, 2)}</pre>
+      </details>
+    </section>
   );
 }
 
@@ -459,8 +622,9 @@ function createConversationSession(index: number): ConversationSession {
   return {
     id: createConversationId(),
     title: `会话 ${index}`,
-    activeMessage: defaultMessage,
+    activeMessage: "",
     uploadedFile: null,
+    messages: [],
     chatResponse: null,
     traceQuery: "",
     traceWaterfall: null,
@@ -473,12 +637,32 @@ function createConversationId(): string {
   return randomId ? `conv_${randomId}` : `conv_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-function deriveSessionTitle(session: ConversationSession, responseText: string): string {
+function createMessageId(prefix: string): string {
+  const randomId = globalThis.crypto?.randomUUID?.();
+  return randomId ? `${prefix}_${randomId}` : `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function latestResponse(session: ConversationSession): ChatApiResponse | null {
+  const latest = [...session.messages].reverse().find((message) => message.response);
+  return latest?.response ?? null;
+}
+
+function traceFromResponse(response?: ChatApiResponse | null): TraceStep[] {
+  return response?.trace?.length
+    ? response.trace.map((step) => ({
+        name: step.name,
+        detail: JSON.stringify(step.payload),
+        status: "done"
+      }))
+    : [];
+}
+
+function deriveSessionTitle(session: ConversationSession, responseText: string, fallback: string): string {
   if (!/^会话 \d+$/.test(session.title)) {
     return session.title;
   }
-  const source = session.activeMessage || responseText || session.id;
-  const title = source.trim().replace(/\s+/g, " ").slice(0, 18);
+  const source = fallback || responseText || session.id;
+  const title = source.trim().replace(/\s+/g, " ").slice(0, 22);
   return title || session.title;
 }
 

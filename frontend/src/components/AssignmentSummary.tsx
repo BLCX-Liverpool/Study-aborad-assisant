@@ -2,10 +2,22 @@ import { BookOpen, CheckCircle2, CircleAlert, FileSearch } from "lucide-react";
 import type { AssignmentAnalysis } from "../types";
 
 type AssignmentSummaryProps = {
-  assignment: AssignmentAnalysis;
+  assignment?: AssignmentAnalysis | null;
 };
 
 export function AssignmentSummary({ assignment }: AssignmentSummaryProps) {
+  if (!assignment) {
+    return (
+      <section className="panel assignment-panel">
+        <div className="panel-heading">
+          <BookOpen size={18} />
+          <h2>Assignment Analysis</h2>
+        </div>
+        <p className="module-hint">上传课程文件或输入作业要求后，这里会展示截止时间、交付物、评分依据和待确认信息。</p>
+      </section>
+    );
+  }
+
   const evidenceCount = [
     ...assignment.marking_criteria,
     ...assignment.constraints
@@ -67,4 +79,3 @@ function formatDate(value?: string | null) {
     minute: "2-digit"
   }).format(new Date(value));
 }
-

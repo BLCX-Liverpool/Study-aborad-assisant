@@ -2,24 +2,30 @@ import { AlarmClock, CalendarDays } from "lucide-react";
 import type { PlannerOutput } from "../types";
 
 type TaskTimelineProps = {
-  plan: PlannerOutput;
+  plan?: PlannerOutput | null;
 };
 
 export function TaskTimeline({ plan }: TaskTimelineProps) {
+  const tasks = plan?.tasks ?? [];
+
   return (
     <section className="panel timeline-panel">
       <div className="panel-heading">
         <CalendarDays size={18} />
         <h2>Task Timeline</h2>
       </div>
-      {plan.selected_strategy && (
+      {!plan ? (
+        <p className="module-hint">输入任务并运行后，这里会把学习、申请或生活事项拆成时间线和提醒草稿。</p>
+      ) : null}
+      {plan?.selected_strategy && (
         <div className="planner-strategy-row">
           <span>{plan.selected_strategy.split("_").join(" ")}</span>
           <span>{plan.planning_candidates?.length ?? 0} candidates evaluated</span>
         </div>
       )}
-      <ol className="timeline">
-        {plan.tasks.map((task) => (
+      {tasks.length ? (
+        <ol className="timeline">
+          {tasks.map((task) => (
           <li key={task.title}>
             <div className={`priority-dot ${task.priority}`} />
             <div className="timeline-content">
@@ -31,12 +37,15 @@ export function TaskTimeline({ plan }: TaskTimelineProps) {
               <time>{formatRange(task.start_time, task.deadline)}</time>
             </div>
           </li>
-        ))}
-      </ol>
-      <div className="reminder-row">
-        <AlarmClock size={16} />
-        <span>{plan.reminders.length} reminder draft prepared</span>
-      </div>
+          ))}
+        </ol>
+      ) : null}
+      {plan ? (
+        <div className="reminder-row">
+          <AlarmClock size={16} />
+          <span>{plan.reminders.length} reminder draft prepared</span>
+        </div>
+      ) : null}
     </section>
   );
 }
