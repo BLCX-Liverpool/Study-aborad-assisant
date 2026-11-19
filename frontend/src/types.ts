@@ -180,6 +180,7 @@ export type UploadedFile = {
 };
 
 export type ChatApiResponse = {
+  mode?: "sync";
   user_id: string;
   conversation_id: string;
   trace_id: string;
@@ -215,6 +216,54 @@ export type ChatApiResponse = {
   missing_information: string[];
   next_actions: string[];
 };
+
+export type WorkflowAccepted = {
+  mode: "async";
+  workflow_id: string;
+  trace_id: string;
+  status: string;
+  status_url: string;
+  events_url: string;
+};
+
+export type WorkflowStepView = {
+  id: string;
+  step_key: string;
+  intent_name: string;
+  agent_intent: string;
+  status: string;
+  attempt_count: number;
+  max_attempts: number;
+  result_summary?: string | null;
+  missing_information: string[];
+  last_error_code?: string | null;
+  last_error_message?: string | null;
+};
+
+export type WorkflowView = {
+  id: string;
+  user_id: string;
+  conversation_id?: string | null;
+  trace_id: string;
+  status: string;
+  final_response?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  progress: number;
+  steps: WorkflowStepView[];
+};
+
+export type WorkflowArtifactView = {
+  id: string;
+  step_id: string;
+  name: string;
+  kind: string;
+  schema_version: number;
+  payload?: Record<string, unknown> | null;
+  storage_uri?: string | null;
+};
+
+export type ChatSubmissionResponse = ChatApiResponse | WorkflowAccepted;
 
 export type LatencyTraceSummary = {
   trace_id: string;

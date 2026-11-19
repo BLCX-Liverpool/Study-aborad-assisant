@@ -1,15 +1,57 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select
 
 from app.agents.orchestrator.repository import TraceSpanRepository
 from app.core.database import get_session
 from app.core.tracing import LatencySpan, summarize_latency_spans
-from app.db.models import TraceSpan
+from app.db.models import MessageInbox, OutboxEvent, TraceSpan, WorkflowRun, WorkflowStep
 from app.schemas.observability import TraceSpanView, TraceWaterfallResponse
 
 router = APIRouter()
+
+
+@router.get("/runtime/metrics")
+async def workflow_runtime_metrics(
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    workflow_rows = await session.execute(
+        select(WorkflowRun.status, func.count()).group_by(WorkflowRun.status)
+    )
+    step_rows = await session.execute(
+        select(WorkflowStep.status, func.count()).group_by(WorkflowStep.status)
+    )
+    pending_outbox = await session.scalar(
+        select(func.count()).select_from(OutboxEvent).where(OutboxEvent.status == "pending")
+    )
+    oldest_outbox = await session.scalar(
+        select(func.min(OutboxEvent.created_at)).where(OutboxEvent.status == "pending")
+    )
+    dead_letters = await session.scalar(
+        select(func.count()).select_from(MessageInbox).where(MessageInbox.status == "dead_lettered")
+    )
+    stale_leases = await session.scalar(
+        select(func.count()).select_from(WorkflowStep).where(
+            WorkflowStep.status == "running",
+            WorkflowStep.lease_expires_at < datetime.now(UTC),
+        )
+    )
+    oldest_age = (
+        max((datetime.now(UTC) - oldest_outbox).total_seconds(), 0.0)
+        if oldest_outbox is not None
+        else 0.0
+    )
+    return {
+        "workflows_by_status": dict(workflow_rows.all()),
+        "steps_by_status": dict(step_rows.all()),
+        "outbox_pending": int(pending_outbox or 0),
+        "outbox_oldest_age_seconds": round(oldest_age, 3),
+        "dead_letters": int(dead_letters or 0),
+        "stale_worker_leases": int(stale_leases or 0),
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
 
 
 @router.get("/traces/{trace_id}/waterfall", response_model=TraceWaterfallResponse)

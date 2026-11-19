@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     text_quality_score DOUBLE PRECISION,
     image_area_ratio DOUBLE PRECISION,
     source_metadata_json JSONB,
-    embedding VECTOR,
+    embedding VECTOR(1536),
     search_vector TSVECTOR GENERATED ALWAYS AS (to_tsvector('simple', coalesce(content, ''))) STORED,
     metadata_json JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS memories (
     source_id VARCHAR(64),
     confidence DOUBLE PRECISION,
     access_policy_json JSONB,
-    embedding VECTOR,
+    embedding VECTOR(1536),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

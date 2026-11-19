@@ -1,0 +1,153 @@
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.0-pg16
+    environment:
+      POSTGRES_DB: study_abroad_assistant
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/app/db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d study_abroad_assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7.4.1-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4.4.0-management
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+      - "${RABBITMQ_METRICS_PORT:-15692}:15692"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./deploy/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./deploy/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: ./backend/.env
+    environment: &backend-environment
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/study_abroad_assistant
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      RABBITMQ_WORKFLOW_ENABLED: "true"
+      RABBITMQ_QUEUE_TYPE: quorum
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "app.workflows.main"]
+    env_file: ./backend/.env
+    environment: *backend-environment
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+
+  outbox-publisher:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "app.outbox.main"]
+    env_file: ./backend/.env
+    environment: *backend-environment
+    depends_on:
+      postgres: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "app.scheduler.main"]
+    env_file: ./backend/.env
+    environment: *backend-environment
+    depends_on:
+      postgres: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+
+  assignment-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "app.workers.main", "--queue", "study.assignment.q"]
+    env_file: ./backend/.env
+    environment: *backend-environment
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+
+  general-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command:
+      - python
+      - -m
+      - app.workers.main
+      - --queue
+      - study.travel.q
+      - --queue
+      - study.finance.q
+      - --queue
+      - study.fitness.q
+      - --queue
+      - study.planner.q
+      - --queue
+      - study.email.q
+      - --queue
+      - study.notice.q
+      - --queue
+      - study.social.q
+      - --queue
+      - study.wellbeing.q
+    env_file: ./backend/.env
+    environment: *backend-environment
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_PROXY_TARGET: http://api:8000
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  rabbitmq_data:

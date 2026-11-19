@@ -1,0 +1,44 @@
+{
+  "exchanges": [
+    {
+      "name": "study.agent.commands.v1",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "study.agent.events.v1",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "study.agent.dlx.v1",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "policies": [
+    {
+      "vhost": "/",
+      "name": "study-workflow-dead-lettering",
+      "pattern": "^study\\.(workflow|assignment|travel|finance|fitness|planner|email|notice|social|wellbeing|orchestrator)\\..*\\.q$",
+      "apply-to": "queues",
+      "definition": {
+        "dead-letter-exchange": "study.agent.dlx.v1",
+        "delivery-limit": 4
+      },
+      "priority": 10
+    }
+  ]
+}

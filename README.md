@@ -186,6 +186,78 @@ cd frontend
 npm run preview
 ```
 
+## RabbitMQ 异步 Workflow Runtime
+
+长任务和多意图 DAG 通过 PostgreSQL Workflow 状态机、Transactional Outbox/Inbox 与 RabbitMQ 执行。PostgreSQL 是状态真相源，RabbitMQ 消息只携带 workflow、step 和 Artifact 引用。
+
+首次启用前，现有数据库需要执行：
+
+```bash
+psql "$DATABASE_URL" -f backend/app/db/migrations/002_rabbitmq_workflow_runtime.sql
+```
+
+本地完整环境：
+
+```bash
+cp backend/.env.example backend/.env
+docker compose -f docker-compose.rabbitmq.yml up --build
+```
+
+如本机端口已占用，可通过 `RABBITMQ_PORT`、`RABBITMQ_MANAGEMENT_PORT`、
+`RABBITMQ_METRICS_PORT` 覆盖三个 RabbitMQ 主机端口。应用会在启动时幂等声明
+durable quorum queues、DLX 和 delivery limit；
+`deploy/rabbitmq/definitions.json` 可作为生产环境改用 RabbitMQ policy 时的导入模板。
+
+主要地址：
+
+- API：`http://127.0.0.1:8000`
+- Frontend：`http://127.0.0.1:5173`
+- RabbitMQ Management：`http://127.0.0.1:15672`
+- RabbitMQ Prometheus metrics：`http://127.0.0.1:15692/metrics`
+
+不使用 Compose 时，各运行进程分别启动：
+
+```bash
+cd backend
+python -m app.workflows.main
+python -m app.outbox.main
+python -m app.scheduler.main
+python -m app.workers.main --queue study.assignment.q
+python -m app.workers.main \
+  --queue study.travel.q \
+  --queue study.finance.q \
+  --queue study.fitness.q \
+  --queue study.planner.q \
+  --queue study.email.q \
+  --queue study.notice.q \
+  --queue study.social.q \
+  --queue study.wellbeing.q
+```
+
+灰度开关：
+
+```env
+RABBITMQ_WORKFLOW_ENABLED=true
+ASYNC_INTENTS='["assignment","travel","finance","task_planning","email","notice_action","social_content"]'
+ASYNC_ROLLOUT_PERCENTAGE=100
+ASYNC_USER_ALLOWLIST='[]'
+```
+
+异步 API：
+
+- `POST /api/v2/chat`：返回同步结果或 `202 WorkflowAccepted`。
+- `GET /api/workflows/{id}`：查询状态和进度。
+- `GET /api/workflows/{id}/steps`：查询步骤。
+- `GET /api/workflows/{id}/artifacts`：查询持久化 Artifact。
+- `GET /api/workflows/{id}/events`：SSE 事件流，支持 `Last-Event-ID`。
+- `POST /api/workflows/{id}/inputs`：补充输入并恢复。
+- `POST /api/workflows/{id}/cancel`：协作式取消。
+- `POST /api/workflows/{id}/retry`：重试失败 Workflow。
+- `POST /api/v2/email/send`：在显式批准后异步发送邮件。
+- `GET /api/observability/runtime/metrics`：Workflow Runtime 指标。
+
+生产环境必须使用独立 RabbitMQ vhost、TLS 和最小权限账号。API/Outbox 账号只发布，业务 Worker 只消费自己的队列并发布事件，Orchestrator 只消费事件和发布 Command。`ADMIN_API_KEY` 未设置时 DLQ 管理接口默认关闭。
+
 ## API 模块
 
 后端路由统一挂载在 `/api` 下，主要模块包括：

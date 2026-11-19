@@ -20,6 +20,33 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/study_abroad_assistant"
     redis_url: str = "redis://localhost:6379/0"
 
+    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+    rabbitmq_vhost: str = "/"
+    rabbitmq_workflow_enabled: bool = False
+    rabbitmq_queue_type: str = "quorum"
+    rabbitmq_heartbeat_seconds: int = 30
+    rabbitmq_connection_timeout_seconds: int = 10
+    rabbitmq_message_max_bytes: int = 131_072
+    async_intents: list[str] = Field(
+        default_factory=lambda: [
+            "assignment",
+            "travel",
+            "finance",
+            "task_planning",
+            "email",
+            "notice_action",
+            "social_content",
+        ]
+    )
+    async_rollout_percentage: int = Field(default=100, ge=0, le=100)
+    async_user_allowlist: list[str] = Field(default_factory=list)
+    workflow_lease_seconds: int = 300
+    workflow_sse_poll_seconds: float = 1.0
+    workflow_sse_timeout_seconds: int = 300
+    workflow_outbox_batch_size: int = 100
+    workflow_scheduler_poll_seconds: float = 10.0
+    admin_api_key: str = ""
+
     llm_provider: str = "openai_compatible"
     llm_model: str = "gpt-4o-mini"
     embedding_model: str = "text-embedding-3-small"

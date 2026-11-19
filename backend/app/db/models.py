@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -14,6 +14,15 @@ def uuid_str() -> str:
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def varchar_enum(enum_type: type[StrEnum]) -> Enum:
+    """Match the VARCHAR status columns created by the SQL migrations."""
+    return Enum(
+        enum_type,
+        native_enum=False,
+        values_callable=lambda members: [member.value for member in members],
+    )
 
 
 class TimestampMixin:
@@ -37,6 +46,7 @@ class RunStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class ReminderStatus(StrEnum):
@@ -55,6 +65,7 @@ class PermissionRequestStatus(StrEnum):
 
 class EmailSendStatus(StrEnum):
     REQUIRES_APPROVAL = "requires_approval"
+    QUEUED = "queued"
     SENT = "sent"
     FAILED = "failed"
     SKIPPED = "skipped"
@@ -167,7 +178,7 @@ class Task(Base, TimestampMixin):
     deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     estimated_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     priority: Mapped[str] = mapped_column(String(32), default="medium")
-    status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.TODO)
+    status: Mapped[TaskStatus] = mapped_column(varchar_enum(TaskStatus), default=TaskStatus.TODO)
     created_by_agent: Mapped[str | None] = mapped_column(String(128), nullable=True)
     evidence_json: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
 
@@ -197,11 +208,16 @@ class Reminder(Base, TimestampMixin):
     event_id: Mapped[str | None] = mapped_column(ForeignKey("events.id"), nullable=True, index=True)
     remind_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     channel: Mapped[str] = mapped_column(String(64), default="in_app")
-    status: Mapped[ReminderStatus] = mapped_column(Enum(ReminderStatus), default=ReminderStatus.PENDING)
+    status: Mapped[ReminderStatus] = mapped_column(
+        varchar_enum(ReminderStatus), default=ReminderStatus.PENDING
+    )
 
 
 class EmailSendAttempt(Base, TimestampMixin):
     __tablename__ = "email_send_attempts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_email_send_attempt_user_idempotency"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uuid_str)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
@@ -210,7 +226,9 @@ class EmailSendAttempt(Base, TimestampMixin):
     from_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     subject: Mapped[str] = mapped_column(String(512))
     body: Mapped[str] = mapped_column(Text)
-    status: Mapped[EmailSendStatus] = mapped_column(Enum(EmailSendStatus), default=EmailSendStatus.REQUIRES_APPROVAL)
+    status: Mapped[EmailSendStatus] = mapped_column(
+        varchar_enum(EmailSendStatus), default=EmailSendStatus.REQUIRES_APPROVAL
+    )
     approved: Mapped[bool] = mapped_column(Boolean, default=False)
     source_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     source_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -223,6 +241,9 @@ class EmailSendAttempt(Base, TimestampMixin):
 
 class AgentRun(Base, TimestampMixin):
     __tablename__ = "agent_runs"
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "step_id", "attempt", name="uq_agent_run_workflow_step_attempt"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uuid_str)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
@@ -231,10 +252,18 @@ class AgentRun(Base, TimestampMixin):
     agent_name: Mapped[str] = mapped_column(String(128), index=True)
     input_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     output_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    status: Mapped[RunStatus] = mapped_column(Enum(RunStatus), default=RunStatus.QUEUED)
+    status: Mapped[RunStatus] = mapped_column(varchar_enum(RunStatus), default=RunStatus.QUEUED)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    workflow_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_runs.id"), nullable=True, index=True
+    )
+    step_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_steps.id"), nullable=True, index=True
+    )
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
 
     tool_runs: Mapped[list["ToolRun"]] = relationship(back_populates="agent_run")
 
@@ -284,7 +313,7 @@ class ToolRun(Base, TimestampMixin):
     permission_level: Mapped[str] = mapped_column(String(64))
     input_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     output_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    status: Mapped[RunStatus] = mapped_column(Enum(RunStatus), default=RunStatus.QUEUED)
+    status: Mapped[RunStatus] = mapped_column(varchar_enum(RunStatus), default=RunStatus.QUEUED)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -334,3 +363,127 @@ class VerifierResult(Base, TimestampMixin):
     verifier_name: Mapped[str] = mapped_column(String(128))
     status: Mapped[str] = mapped_column(String(64))
     result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class WorkflowRun(Base, TimestampMixin):
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        UniqueConstraint("user_id", "request_id", name="uq_workflow_run_user_request"),
+        UniqueConstraint("trace_id", name="uq_workflow_run_trace"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    conversation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    request_id: Mapped[str] = mapped_column(String(255))
+    workflow_type: Mapped[str] = mapped_column(String(64), default="chat", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="created", index=True)
+    input_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    plan_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    final_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkflowStep(Base, TimestampMixin):
+    __tablename__ = "workflow_steps"
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "step_key", name="uq_workflow_step_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uuid_str)
+    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.id"), index=True)
+    step_key: Mapped[str] = mapped_column(String(128))
+    intent_name: Mapped[str] = mapped_column(String(128))
+    agent_intent: Mapped[str] = mapped_column(String(128), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    input_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    input_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    missing_information_json: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class WorkflowStepDependency(Base, TimestampMixin):
+    __tablename__ = "workflow_step_dependencies"
+    __table_args__ = (
+        UniqueConstraint("step_id", "depends_on_step_id", name="uq_workflow_step_dependency"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uuid_str)
+    step_id: Mapped[str] = mapped_column(ForeignKey("workflow_steps.id"), index=True)
+    depends_on_step_id: Mapped[str] = mapped_column(ForeignKey("workflow_steps.id"), index=True)
+    dependency_type: Mapped[str] = mapped_column(String(32), default="success")
+    condition_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class AgentArtifactRecord(Base, TimestampMixin):
+    __tablename__ = "agent_artifacts"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uuid_str)
+    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.id"), index=True)
+    step_id: Mapped[str] = mapped_column(ForeignKey("workflow_steps.id"), index=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    kind: Mapped[str] = mapped_column(String(128), index=True)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    storage_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checksum: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class MessageInbox(Base):
+    __tablename__ = "message_inbox"
+
+    consumer_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    workflow_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    step_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="processing", index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class OutboxEvent(Base, TimestampMixin):
+    __tablename__ = "outbox_events"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uuid_str)
+    aggregate_type: Mapped[str] = mapped_column(String(64), index=True)
+    aggregate_id: Mapped[str] = mapped_column(String(64), index=True)
+    message_type: Mapped[str] = mapped_column(String(128), index=True)
+    routing_key: Mapped[str] = mapped_column(String(255), index=True)
+    payload_json: Mapped[dict] = mapped_column(JSON)
+    headers_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class WorkflowEventLog(Base):
+    __tablename__ = "workflow_event_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.id"), index=True)
+    step_id: Mapped[str | None] = mapped_column(ForeignKey("workflow_steps.id"), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(128), index=True)
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)

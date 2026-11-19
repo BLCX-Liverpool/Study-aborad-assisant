@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 
+from sqlalchemy.exc import IntegrityError
+
 from app.agents.email.approval import EmailApprovalGate
 from app.agents.email.draft_generator import EmailDraftGenerator
 from app.agents.email.providers import EmailProvider, build_email_providers
@@ -62,9 +64,31 @@ class EmailAgentService:
             )
             return await self._audit(request, result)
 
+        reservation_id = None
+        reserve = getattr(self.audit_repository, "reserve_attempt", None)
+        if reserve is not None:
+            try:
+                reservation_id = await reserve(request)
+            except IntegrityError:
+                # A concurrent delivery may have won the unique idempotency key.
+                await self.audit_repository.rollback()
+                existing = await self.audit_repository.find_by_idempotency_key(
+                    user_id=request.user_id,
+                    key=request.idempotency_key,
+                )
+                if existing is not None:
+                    return result_from_attempt(existing)
+                raise
+
         result = await provider.send(request)
         if result.status == "sent" and result.sent_at is None:
             result = result.model_copy(update={"sent_at": datetime.now(UTC)})
+        if reservation_id is not None:
+            await self.audit_repository.update_attempt(attempt_id=reservation_id, result=result)
+            commit = getattr(self.audit_repository, "commit", None)
+            if commit is not None:
+                await commit()
+            return result.model_copy(update={"audit_id": reservation_id})
         return await self._audit(request, result)
 
     async def _audit(self, request: EmailSendRequest, result: EmailSendResult) -> EmailSendResult:

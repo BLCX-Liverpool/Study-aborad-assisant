@@ -53,6 +53,18 @@ class EmailSendAuditRepository:
         await self.session.flush()
         return attempt.id
 
+    async def reserve_attempt(self, request: EmailSendRequest) -> str:
+        reservation = EmailSendResult(
+            status="queued",
+            provider=request.provider,
+            to_email=request.to_email,
+            subject=request.subject,
+            metadata={"reserved_before_external_send": True},
+        )
+        attempt_id = await self.create_attempt(request=request, result=reservation)
+        await self.session.commit()
+        return attempt_id
+
     async def update_attempt(
         self,
         *,
@@ -71,6 +83,12 @@ class EmailSendAuditRepository:
             "dry_run": result.dry_run,
             "result_metadata": result.metadata,
         }
+
+    async def commit(self) -> None:
+        await self.session.commit()
+
+    async def rollback(self) -> None:
+        await self.session.rollback()
 
 
 def result_from_attempt(attempt: EmailSendAttempt) -> EmailSendResult:
@@ -94,6 +112,8 @@ def _db_status(status: str) -> EmailSendStatus:
         return EmailSendStatus.REQUIRES_APPROVAL
     if status == "sent":
         return EmailSendStatus.SENT
+    if status == "queued":
+        return EmailSendStatus.QUEUED
     if status == "skipped":
         return EmailSendStatus.SKIPPED
     return EmailSendStatus.FAILED

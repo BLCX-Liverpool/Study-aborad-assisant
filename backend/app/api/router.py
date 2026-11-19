@@ -3,7 +3,10 @@ from fastapi import APIRouter
 from app.api.routes import (
     assignment,
     chat,
+    chat_v2,
+    dead_letters,
     email,
+    email_v2,
     execution,
     files,
     finance,
@@ -18,13 +21,17 @@ from app.api.routes import (
     tools,
     travel,
     wellbeing,
+    workflows,
 )
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
 api_router.include_router(assignment.router, prefix="/assignment", tags=["assignment"])
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
+api_router.include_router(chat_v2.router, prefix="/v2/chat", tags=["chat-v2"])
+api_router.include_router(dead_letters.router, prefix="/admin/dead-letters", tags=["admin"])
 api_router.include_router(email.router, prefix="/email", tags=["email"])
+api_router.include_router(email_v2.router, prefix="/v2/email", tags=["email-v2"])
 api_router.include_router(execution.router, prefix="/execution", tags=["execution"])
 api_router.include_router(files.router, prefix="/files", tags=["files"])
 api_router.include_router(finance.router, prefix="/finance", tags=["finance"])
@@ -38,3 +45,4 @@ api_router.include_router(social_content.router, prefix="/social-content", tags=
 api_router.include_router(tools.router, prefix="/tools", tags=["tools"])
 api_router.include_router(travel.router, prefix="/travel", tags=["travel"])
 api_router.include_router(wellbeing.router, prefix="/wellbeing", tags=["wellbeing"])
+api_router.include_router(workflows.router, prefix="/workflows", tags=["workflows"])

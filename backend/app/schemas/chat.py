@@ -31,6 +31,7 @@ class AgentArtifact(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    mode: Literal["sync"] = "sync"
     user_id: str
     conversation_id: str
     trace_id: str

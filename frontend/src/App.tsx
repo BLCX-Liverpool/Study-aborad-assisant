@@ -31,7 +31,8 @@ import {
   fetchTraceWaterfall,
   indexSelectedArxivSources,
   rejectMemoryCandidates,
-  sendChatMessage
+  sendChatMessage,
+  waitForWorkflow
 } from "./lib/api";
 import type {
   ActionItem,
@@ -77,10 +78,26 @@ type ConversationSession = {
 
 const initialConversation = createConversationSession(1);
 
+function formatWorkflowProgress(eventName: string): string {
+  const labels: Record<string, string> = {
+    "workflow.created": "Queued for execution...",
+    "workflow.planning": "Planning the workflow...",
+    "workflow.running": "Running the workflow...",
+    "step.queued": "An agent step is queued...",
+    "step.started": "An agent is working...",
+    "step.retry_wait": "A temporary failure occurred; retry is scheduled...",
+    "step.completed": "An agent step completed...",
+    "artifact.created": "A partial result is ready...",
+    "workflow.waiting_input": "Waiting for additional information..."
+  };
+  return labels[eventName] ?? eventName;
+}
+
 export function App() {
   const [sessions, setSessions] = useState<ConversationSession[]>([initialConversation]);
   const [activeConversationId, setActiveConversationId] = useState(initialConversation.id);
   const [chatLoading, setChatLoading] = useState(false);
+  const [workflowProgress, setWorkflowProgress] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
   const [traceError, setTraceError] = useState<string | null>(null);
@@ -157,6 +174,7 @@ export function App() {
       messages: [...current.messages, userMessage]
     }));
     setChatLoading(true);
+    setWorkflowProgress("Submitting request...");
     setChatError(null);
 
     try {
@@ -176,24 +194,28 @@ export function App() {
           : {}
       });
 
+      const completedResponse = response.mode === "async"
+        ? await waitForWorkflow(response, userId, (eventName) => setWorkflowProgress(formatWorkflowProgress(eventName)))
+        : response;
+
       const assistantMessage: ConversationMessage = {
         id: createMessageId("assistant"),
         role: "assistant",
-        content: response.final_response,
+        content: completedResponse.final_response,
         createdAt: new Date().toISOString(),
-        response
+        response: completedResponse
       };
 
       patchSession(session.id, (current) => ({
         ...current,
-        chatResponse: response,
+        chatResponse: completedResponse,
         messages: [...current.messages, assistantMessage],
-        title: deriveSessionTitle(current, response.final_response, message),
-        traceQuery: response.trace_id,
+        title: deriveSessionTitle(current, completedResponse.final_response, message),
+        traceQuery: completedResponse.trace_id,
         traceWaterfall: null,
         researchIndexingResult: null
       }));
-      await loadTraceWaterfall(response.trace_id, session.id);
+      await loadTraceWaterfall(completedResponse.trace_id, session.id);
       await loadMemoryReview();
     } catch (error) {
       setChatError(error instanceof Error ? error.message : "Chat request failed");
@@ -203,6 +225,7 @@ export function App() {
       }));
     } finally {
       setChatLoading(false);
+      setWorkflowProgress(null);
     }
   }
 
@@ -360,7 +383,7 @@ export function App() {
               </div>
               <div className="message-bubble loading-bubble">
                 <Loader2 className="spin" size={16} />
-                <span>Analyzing and routing your task...</span>
+                <span>{workflowProgress ?? "Analyzing and routing your task..."}</span>
               </div>
             </div>
           ) : null}
