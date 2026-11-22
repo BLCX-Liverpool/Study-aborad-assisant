@@ -1454,6 +1454,71 @@ li {
   font-weight: 800;
 }
 
+.workflow-runtime-card {
+  margin: 12px 48px;
+  padding: 16px;
+  border: 1px solid #dce7df;
+  border-radius: 14px;
+  background: #f8fbf9;
+}
+
+.workflow-runtime-header,
+.workflow-step-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.workflow-progress-track {
+  height: 6px;
+  margin: 10px 0 14px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e3ebe6;
+}
+
+.workflow-progress-track span {
+  display: block;
+  height: 100%;
+  background: #36745a;
+}
+
+.workflow-step-row {
+  padding: 10px 0;
+  border-top: 1px solid #e6ece8;
+  font-size: 12px;
+}
+
+.workflow-step-row small {
+  display: block;
+  color: #66736c;
+}
+
+.workflow-artifacts {
+  margin-top: 10px;
+  color: #315848;
+  font-size: 12px;
+}
+
+.workflow-input-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.workflow-input-form textarea {
+  min-height: 72px;
+}
+
+.workflow-input-form button {
+  justify-self: start;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: #315848;
+  color: white;
+}
+
 @media (max-width: 540px) {
   .chat-app-shell {
     grid-template-columns: 1fr;

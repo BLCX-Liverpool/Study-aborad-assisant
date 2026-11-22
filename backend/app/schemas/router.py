@@ -29,6 +29,7 @@ class StructuredIntent(BaseModel):
     slots: dict = Field(default_factory=dict)
     condition: str | None = None
     depends_on: list[int] = Field(default_factory=list)
+    dependency_type: Literal["success", "completion", "failure"] = "success"
     missing_slots: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     source: str = "fusion"

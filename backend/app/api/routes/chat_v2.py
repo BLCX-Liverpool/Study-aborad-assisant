@@ -7,6 +7,7 @@ from app.agents.orchestrator.repository import AgentRunRecorder, RouterObservati
 from app.agents.orchestrator.service import StudyAbroadOrchestrator
 from app.agents.router.service import IntentRouter
 from app.core.database import get_session
+from app.core.auth import CurrentUser, assert_user, get_current_user
 from app.core.redis import get_redis
 from app.memory.manager import MemoryManager
 from app.memory.repository import ConversationRepository, LongTermMemoryRepository
@@ -34,8 +35,10 @@ async def chat_v2(
     request: ChatV2Request,
     response: Response,
     idempotency_key: str = Header(default_factory=lambda: str(uuid4()), alias="Idempotency-Key"),
+    current_user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ChatResponse | WorkflowAccepted:
+    assert_user(request.user_id, current_user)
     if request.execution_mode == "async" and not get_settings().rabbitmq_workflow_enabled:
         raise HTTPException(status_code=503, detail="Asynchronous workflow execution is disabled")
     # Routing remains synchronous so safety-sensitive wellbeing and clarification

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.orchestrator.workers import WorkerRunResult
-from app.db.models import AgentRun, RunStatus, WorkflowRun, WorkflowStep
+from app.db.models import AgentRun, RunStatus, TraceSpan, WorkflowRun, WorkflowStep
 from app.messaging.dispatcher import OutboxDispatcher
 from app.schemas.messages import AgentStepEvent, AgentTaskCommand, ArtifactCreatedEvent
 from app.workflows.repository import InboxRepository, WorkflowRepository
@@ -14,6 +14,10 @@ from app.workflows.state_machine import StepStatus, WorkflowStatus
 
 
 RETRY_DELAYS_SECONDS = (10, 30, 120)
+
+
+def retry_delay_seconds(attempt_count: int) -> int:
+    return RETRY_DELAYS_SECONDS[min(max(attempt_count - 1, 0), len(RETRY_DELAYS_SECONDS) - 1)]
 
 
 class WorkerResultService:
@@ -120,7 +124,7 @@ class WorkerResultService:
     ) -> None:
         exhausted = step.attempt_count >= step.max_attempts
         if retryable and not exhausted:
-            delay = RETRY_DELAYS_SECONDS[min(step.attempt_count - 1, len(RETRY_DELAYS_SECONDS) - 1)]
+            delay = retry_delay_seconds(step.attempt_count)
             target = StepStatus.RETRY_WAIT
             event_type = "agent.step.retry_scheduled"
             await self.repository.transition_step(
@@ -241,3 +245,23 @@ class WorkerResultService:
         attempt.output_json = output_json
         attempt.error = error
         attempt.completed_at = datetime.now(UTC)
+        started_at = attempt.started_at or step.started_at or attempt.completed_at
+        self.session.add(
+            TraceSpan(
+                trace_id=workflow.trace_id,
+                parent_span_id=command.parent_span_id,
+                user_id=workflow.user_id,
+                conversation_id=workflow.conversation_id,
+                agent_run_id=attempt.id,
+                span_name=f"worker.{step.agent_intent}.attempt.{step.attempt_count}",
+                span_type="agent_worker",
+                status="failed" if status == RunStatus.FAILED else "completed",
+                started_at=started_at,
+                completed_at=attempt.completed_at,
+                duration_ms=max((attempt.completed_at - started_at).total_seconds() * 1000, 0.0),
+                input_json={"message_id": command.message_id, "schema_version": command.schema_version},
+                output_json=output_json,
+                error=error,
+                metadata_json={"agent": step.agent_intent, "attempt": step.attempt_count},
+            )
+        )

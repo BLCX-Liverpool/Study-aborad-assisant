@@ -194,6 +194,8 @@ npm run preview
 
 ```bash
 psql "$DATABASE_URL" -f backend/app/db/migrations/002_rabbitmq_workflow_runtime.sql
+psql "$DATABASE_URL" -f backend/app/db/migrations/003_workflow_attempt_integrity.sql
+psql "$DATABASE_URL" -f backend/app/db/migrations/004_runtime_contract_completion.sql
 ```
 
 本地完整环境：
@@ -207,6 +209,13 @@ docker compose -f docker-compose.rabbitmq.yml up --build
 `RABBITMQ_METRICS_PORT` 覆盖三个 RabbitMQ 主机端口。应用会在启动时幂等声明
 durable quorum queues、DLX 和 delivery limit；
 `deploy/rabbitmq/definitions.json` 可作为生产环境改用 RabbitMQ policy 时的导入模板。
+
+本地前端会从仅在 `development/dev/local/test` 环境开放的
+`POST /api/auth/development-token` 获取签名 Bearer Token。也可执行
+`cd backend && python -m app.core.auth local_user` 手动生成，并写入前端
+`sessionStorage.study_access_token`。生产环境不会开放开发令牌端点，必须由正式登录系统
+把短期访问令牌放入该 session storage 项；所有 Workflow 查询、SSE、补充输入、取消与重试
+都会按令牌主体校验所有权。
 
 主要地址：
 
@@ -238,6 +247,7 @@ python -m app.workers.main \
 
 ```env
 RABBITMQ_WORKFLOW_ENABLED=true
+LEGACY_LONG_TASK_ENDPOINTS_ENABLED=false
 ASYNC_INTENTS='["assignment","travel","finance","task_planning","email","notice_action","social_content"]'
 ASYNC_ROLLOUT_PERCENTAGE=100
 ASYNC_USER_ALLOWLIST='[]'
@@ -256,7 +266,11 @@ ASYNC_USER_ALLOWLIST='[]'
 - `POST /api/v2/email/send`：在显式批准后异步发送邮件。
 - `GET /api/observability/runtime/metrics`：Workflow Runtime 指标。
 
-生产环境必须使用独立 RabbitMQ vhost、TLS 和最小权限账号。API/Outbox 账号只发布，业务 Worker 只消费自己的队列并发布事件，Orchestrator 只消费事件和发布 Command。`ADMIN_API_KEY` 未设置时 DLQ 管理接口默认关闭。
+生产环境必须使用独立 RabbitMQ vhost、TLS 和最小权限账号。API/Outbox 账号只发布，业务 Worker 只消费自己的队列并发布事件，Orchestrator 只消费事件和发布 Command。`ADMIN_API_KEY` 未设置时 DLQ 管理接口默认关闭。三节点 RabbitMQ、SAC、Topology Operator 资源、External Secrets、HPA/PDB 与 NetworkPolicy 基线位于 `deploy/production/`；生产运行时必须设置 `RABBITMQ_DECLARE_TOPOLOGY=false`，由 Topology Operator 预置资源。
+
+完整单元测试默认运行；真实 PostgreSQL 与 RabbitMQ 故障/幂等场景分别通过
+`RUN_WORKFLOW_INTEGRATION=1` 和 `RUN_RABBITMQ_INTEGRATION=1` 启用。后者包含真实 broker
+中的不支持 schema 版本拒绝与 DLQ 验证。
 
 ## API 模块
 

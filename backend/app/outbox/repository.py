@@ -34,7 +34,7 @@ class OutboxRepository:
         await self.session.commit()
         return events
 
-    async def mark_published(self, event_id: str) -> None:
+    async def mark_published(self, event_id: str, *, publish_latency_ms: float | None = None) -> None:
         await self.session.execute(
             update(OutboxEvent)
             .where(OutboxEvent.id == event_id, OutboxEvent.status == "publishing")
@@ -42,6 +42,7 @@ class OutboxRepository:
                 status="published",
                 published_at=datetime.now(UTC),
                 last_error=None,
+                publish_latency_ms=publish_latency_ms,
                 updated_at=datetime.now(UTC),
             )
         )

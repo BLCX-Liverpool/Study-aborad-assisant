@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import re
 from uuid import uuid4
 
 from sqlalchemy import and_, select, update
@@ -26,6 +27,26 @@ from app.workflows.state_machine import (
 
 class WorkflowNotFound(LookupError):
     pass
+
+
+TERMINAL_DEPENDENCY_STATUSES = {
+    StepStatus.COMPLETED.value,
+    StepStatus.FAILED.value,
+    StepStatus.DEAD_LETTERED.value,
+    StepStatus.CANCELLED.value,
+}
+
+
+def _safe_condition_expression(expression: str, upstream: WorkflowStep) -> bool:
+    """Evaluate the contract's small condition language without executing code."""
+    normalized = expression.strip()
+    status_match = re.fullmatch(r"status\s*==\s*['\"]?([a-z_]+)['\"]?", normalized)
+    if status_match:
+        return upstream.status == status_match.group(1)
+    contains_match = re.fullmatch(r"result(?:_summary)?\s+contains\s+['\"](.+)['\"]", normalized)
+    if contains_match:
+        return contains_match.group(1) in (upstream.result_summary or "")
+    return False
 
 
 class WorkflowRepository:
@@ -147,7 +168,7 @@ class WorkflowRepository:
                 input_ref=f"workflow-input:{workflow_id}",
                 result_summary=item.get("result_summary"),
                 missing_information_json=list(item.get("missing_slots") or []),
-                max_attempts=int(item.get("max_attempts", 3)),
+                max_attempts=int(item.get("max_attempts", 4)),
             )
             self.session.add(step)
             by_index[index] = step
@@ -166,7 +187,14 @@ class WorkflowRepository:
                         id=str(uuid4()),
                         step_id=step.id,
                         depends_on_step_id=dependency.id,
-                        condition_json={"expression": item.get("condition")} if item.get("condition") else None,
+                        dependency_type=str(item.get("dependency_type", "success")),
+                        condition_json=(
+                            item.get("condition")
+                            if isinstance(item.get("condition"), dict)
+                            else {"expression": item.get("condition")}
+                            if item.get("condition")
+                            else None
+                        ),
                     )
                 )
         await self.session.flush()
@@ -198,25 +226,25 @@ class WorkflowRepository:
             )
         ) if steps else None
         dependencies = list(result.scalars().all()) if result is not None else []
-        statuses = {step.id: step.status for step in steps}
-        dependency_ids: dict[str, list[str]] = {}
+        by_id = {step.id: step for step in steps}
+        dependency_ids: dict[str, list[WorkflowStepDependency]] = {}
         for dependency in dependencies:
-            dependency_ids.setdefault(dependency.step_id, []).append(dependency.depends_on_step_id)
-        return [
-            step
-            for step in steps
-            if step.status == StepStatus.PENDING.value
-            and all(statuses.get(dep_id) == StepStatus.COMPLETED.value for dep_id in dependency_ids.get(step.id, []))
-        ]
+            dependency_ids.setdefault(dependency.step_id, []).append(dependency)
+        ready: list[WorkflowStep] = []
+        for step in steps:
+            if step.status != StepStatus.PENDING.value:
+                continue
+            checks = [
+                await self._dependency_satisfied(item, by_id.get(item.depends_on_step_id))
+                for item in dependency_ids.get(step.id, [])
+            ]
+            if all(checks):
+                ready.append(step)
+        return ready
 
     async def cancel_blocked_steps(self, workflow_id: str) -> int:
         """Recursively terminate pending DAG branches whose dependencies cannot succeed."""
         cancelled = 0
-        blocking_statuses = {
-            StepStatus.FAILED.value,
-            StepStatus.DEAD_LETTERED.value,
-            StepStatus.CANCELLED.value,
-        }
         while True:
             steps = await self.list_steps(workflow_id)
             if not steps:
@@ -227,25 +255,73 @@ class WorkflowRepository:
                 )
             )
             dependencies = list(result.scalars().all())
-            statuses = {step.id: step.status for step in steps}
-            blocked_ids = {
-                dependency.step_id
-                for dependency in dependencies
-                if statuses.get(dependency.depends_on_step_id) in blocking_statuses
-            }
+            by_id = {step.id: step for step in steps}
+            blocked_ids: set[str] = set()
+            for dependency in dependencies:
+                upstream = by_id.get(dependency.depends_on_step_id)
+                if upstream is None or upstream.status not in TERMINAL_DEPENDENCY_STATUSES:
+                    continue
+                if not await self._dependency_satisfied(dependency, upstream):
+                    blocked_ids.add(dependency.step_id)
             changed_this_round = 0
             for step in steps:
                 if step.id in blocked_ids and step.status == StepStatus.PENDING.value:
                     changed = await self.transition_step(
                         step,
                         StepStatus.CANCELLED,
-                        last_error_code="dependency_failed",
-                        last_error_message="A required upstream step did not complete successfully.",
+                        last_error_code="dependency_condition_not_met",
+                        last_error_message="An upstream dependency or its condition was not satisfied.",
                     )
                     changed_this_round += int(changed)
             cancelled += changed_this_round
             if changed_this_round == 0:
                 return cancelled
+
+    async def _dependency_satisfied(
+        self,
+        dependency: WorkflowStepDependency,
+        upstream: WorkflowStep | None,
+    ) -> bool:
+        if upstream is None:
+            return False
+        dependency_type = dependency.dependency_type or "success"
+        if dependency_type == "success":
+            type_matches = upstream.status == StepStatus.COMPLETED.value
+        elif dependency_type == "completion":
+            type_matches = upstream.status in TERMINAL_DEPENDENCY_STATUSES
+        elif dependency_type == "failure":
+            type_matches = upstream.status in {
+                StepStatus.FAILED.value,
+                StepStatus.DEAD_LETTERED.value,
+                StepStatus.CANCELLED.value,
+            }
+        else:
+            return False
+        if not type_matches:
+            return False
+        condition = dependency.condition_json or {}
+        if not condition:
+            return True
+        required_status = condition.get("required_status")
+        if required_status and upstream.status != required_status:
+            return False
+        result_contains = condition.get("result_contains")
+        if result_contains and str(result_contains) not in (upstream.result_summary or ""):
+            return False
+        artifact_kind = condition.get("artifact_kind")
+        if artifact_kind:
+            found = await self.session.scalar(
+                select(AgentArtifactRecord.id).where(
+                    AgentArtifactRecord.step_id == upstream.id,
+                    AgentArtifactRecord.kind == str(artifact_kind),
+                ).limit(1)
+            )
+            if found is None:
+                return False
+        expression = condition.get("expression")
+        if expression and not _safe_condition_expression(str(expression), upstream):
+            return False
+        return True
 
     async def transition_step(
         self,

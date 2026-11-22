@@ -208,6 +208,11 @@ class Reminder(Base, TimestampMixin):
     event_id: Mapped[str | None] = mapped_column(ForeignKey("events.id"), nullable=True, index=True)
     remind_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     channel: Mapped[str] = mapped_column(String(64), default="in_app")
+    recipient_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    delivery_approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     status: Mapped[ReminderStatus] = mapped_column(
         varchar_enum(ReminderStatus), default=ReminderStatus.PENDING
     )
@@ -406,7 +411,7 @@ class WorkflowStep(Base, TimestampMixin):
     input_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
-    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=4)
     available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     lease_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
@@ -459,6 +464,12 @@ class MessageInbox(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    exchange_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    routing_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    message_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    headers_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    causation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class OutboxEvent(Base, TimestampMixin):
@@ -476,6 +487,17 @@ class OutboxEvent(Base, TimestampMixin):
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publish_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class WorkerHeartbeat(Base):
+    __tablename__ = "worker_heartbeats"
+
+    worker_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    queue_names_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class WorkflowEventLog(Base):

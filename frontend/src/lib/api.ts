@@ -19,6 +19,23 @@ import type {
 } from "../types";
 
 const API_PREFIX = "/api";
+let cachedAuthToken = "";
+
+async function authHeaders(extra: Record<string, string> = {}): Promise<Record<string, string>> {
+  let token = cachedAuthToken || sessionStorage.getItem("study_access_token") || "";
+  if (!token && import.meta.env.DEV && import.meta.env.VITE_AUTH_TOKEN) {
+    token = import.meta.env.VITE_AUTH_TOKEN;
+  }
+  if (!token && import.meta.env.DEV) {
+    const response = await fetch(`${API_PREFIX}/auth/development-token?user_id=local_user`, { method: "POST" });
+    if (response.ok) token = (await response.json()).access_token;
+  }
+  if (token) {
+    cachedAuthToken = token;
+    sessionStorage.setItem("study_access_token", token);
+  }
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : extra;
+}
 
 export async function uploadFile(params: {
   file: File;
@@ -99,7 +116,8 @@ export async function sendChatMessage(params: {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Idempotency-Key": idempotencyKey
+      "Idempotency-Key": idempotencyKey,
+      ...(await authHeaders())
     },
     body: JSON.stringify({
       user_id: params.userId,
@@ -118,8 +136,8 @@ export async function sendChatMessage(params: {
   return response.json();
 }
 
-export async function fetchWorkflow(workflow: WorkflowAccepted, userId: string): Promise<WorkflowView> {
-  const response = await fetch(`${workflow.status_url}?user_id=${encodeURIComponent(userId)}`);
+export async function fetchWorkflow(workflow: WorkflowAccepted): Promise<WorkflowView> {
+  const response = await fetch(workflow.status_url, { headers: await authHeaders() });
   if (!response.ok) {
     throw new Error(`Workflow lookup failed: ${response.status}`);
   }
@@ -128,11 +146,9 @@ export async function fetchWorkflow(workflow: WorkflowAccepted, userId: string):
 
 export async function fetchWorkflowArtifacts(
   workflow: WorkflowAccepted,
-  userId: string
+  _userId?: string
 ): Promise<WorkflowArtifactView[]> {
-  const response = await fetch(
-    `${workflow.status_url}/artifacts?user_id=${encodeURIComponent(userId)}`
-  );
+  const response = await fetch(`${workflow.status_url}/artifacts`, { headers: await authHeaders() });
   if (!response.ok) {
     throw new Error(`Workflow artifact lookup failed: ${response.status}`);
   }
@@ -141,57 +157,90 @@ export async function fetchWorkflowArtifacts(
 
 export function waitForWorkflow(
   workflow: WorkflowAccepted,
-  userId: string,
-  onProgress?: (eventName: string) => void
+  _userId: string,
+  onProgress?: (eventName: string, state?: WorkflowView, artifacts?: WorkflowArtifactView[]) => void,
+  afterEventId?: string
 ): Promise<ChatApiResponse> {
-  return new Promise((resolve, reject) => {
-    const url = `${workflow.events_url}?user_id=${encodeURIComponent(userId)}`;
-    const source = new EventSource(url);
-    let settled = false;
-    const finish = async (eventName: string) => {
-      if (settled) return;
-      settled = true;
-      source.close();
-      try {
-        const [state, artifacts] = await Promise.all([
-          fetchWorkflow(workflow, userId),
-          fetchWorkflowArtifacts(workflow, userId)
-        ]);
-        resolve(workflowAsChatResponse(state, artifacts));
-      } catch (error) {
-        reject(error);
-      }
-      onProgress?.(eventName);
-    };
-    const progressEvents = [
-      "workflow.created",
-      "workflow.planning",
-      "workflow.running",
-      "step.queued",
-      "step.started",
-      "step.retry_wait",
-      "step.completed",
-      "artifact.created"
-    ];
-    for (const name of progressEvents) {
-      source.addEventListener(name, () => onProgress?.(name));
-    }
-    for (const name of [
-      "workflow.completed",
-      "workflow.partial_failed",
-      "workflow.failed",
-      "workflow.cancelled",
-      "workflow.dead_lettered",
-      "workflow.waiting_input"
-    ]) {
-      source.addEventListener(name, () => void finish(name));
-    }
-    source.onerror = () => {
-      if (!settled && source.readyState === EventSource.CLOSED) {
-        reject(new Error("Workflow event stream closed before a terminal status was received"));
-      }
-    };
+  return streamWorkflow(workflow, onProgress, afterEventId);
+}
+
+export class WorkflowNeedsInputError extends Error {
+  constructor(
+    public workflow: WorkflowAccepted,
+    public state: WorkflowView,
+    public artifacts: WorkflowArtifactView[],
+    public lastEventId?: string
+  ) {
+    super("Workflow is waiting for additional information");
+  }
+}
+
+async function streamWorkflow(
+  workflow: WorkflowAccepted,
+  onProgress?: (eventName: string, state?: WorkflowView, artifacts?: WorkflowArtifactView[]) => void,
+  afterEventId?: string
+): Promise<ChatApiResponse> {
+  const headers = await authHeaders({ Accept: "text/event-stream" });
+  if (afterEventId) headers["Last-Event-ID"] = afterEventId;
+  const response = await fetch(workflow.events_url, {
+    headers
   });
+  if (!response.ok || !response.body) throw new Error(`Workflow stream failed: ${response.status}`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const terminal = new Set([
+    "workflow.completed", "workflow.partial_failed", "workflow.failed",
+    "workflow.cancelled", "workflow.dead_lettered", "workflow.waiting_input"
+  ]);
+  let lastEventId = afterEventId;
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const eventName = block.split("\n").find((line) => line.startsWith("event:"))?.slice(6).trim();
+      lastEventId = block.split("\n").find((line) => line.startsWith("id:"))?.slice(3).trim() || lastEventId;
+      if (eventName) {
+        const [state, artifacts] = await Promise.all([
+          fetchWorkflow(workflow), fetchWorkflowArtifacts(workflow)
+        ]);
+        onProgress?.(eventName, state, artifacts);
+        if (terminal.has(eventName)) {
+          await reader.cancel();
+          if (eventName === "workflow.waiting_input") {
+            throw new WorkflowNeedsInputError(workflow, state, artifacts, lastEventId);
+          }
+          return workflowAsChatResponse(state, artifacts);
+        }
+      }
+      boundary = buffer.indexOf("\n\n");
+    }
+    if (done) break;
+  }
+  const state = await fetchWorkflow(workflow);
+  const artifacts = await fetchWorkflowArtifacts(workflow);
+  if (state.status === "waiting_input") throw new WorkflowNeedsInputError(workflow, state, artifacts, lastEventId);
+  if (["completed", "partial_failed", "failed", "cancelled", "dead_lettered"].includes(state.status)) {
+    return workflowAsChatResponse(state, artifacts);
+  }
+  throw new Error("Workflow event stream closed before a terminal status was received");
+}
+
+export async function submitWorkflowInput(
+  workflow: WorkflowAccepted,
+  stepId: string,
+  agent: string,
+  values: Record<string, unknown>
+): Promise<void> {
+  const response = await fetch(`${workflow.status_url}/inputs`, {
+    method: "POST",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ step_id: stepId, agent_inputs: { [agent]: values } })
+  });
+  if (!response.ok) throw new Error(`Workflow input submission failed: ${response.status}`);
 }
 
 function workflowAsChatResponse(

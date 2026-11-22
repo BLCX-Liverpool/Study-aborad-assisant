@@ -194,6 +194,7 @@ export type ChatApiResponse = {
       slots: Record<string, unknown>;
       condition?: string | null;
       depends_on: number[];
+      dependency_type?: "success" | "completion" | "failure";
       missing_slots: string[];
       confidence: number;
       source: string;
@@ -343,7 +344,8 @@ export type MultiIntentExecutionPlan = {
     agent_intent: string;
     status: "planned" | "completed" | "needs_input" | "skipped" | "blocked" | "failed";
     depends_on: number[];
-    condition?: string | null;
+    dependency_type?: "success" | "completion" | "failure";
+    condition?: string | Record<string, unknown> | null;
     slots: Record<string, unknown>;
     missing_slots: string[];
     result_summary?: string | null;

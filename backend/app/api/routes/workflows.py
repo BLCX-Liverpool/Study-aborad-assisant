@@ -4,11 +4,12 @@ import asyncio
 import json
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.auth import CurrentUser, get_current_user
 from app.core.database import get_session, get_session_factory
 from app.schemas.workflow import (
     WorkflowActionResult,
@@ -35,11 +36,11 @@ TERMINAL_WORKFLOW_STATUSES = {
 @router.get("/{workflow_id}", response_model=WorkflowView)
 async def get_workflow(
     workflow_id: str,
-    user_id: str = Query(...),
+    current_user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> WorkflowView:
     try:
-        return await WorkflowService(session).view(workflow_id, user_id=user_id)
+        return await WorkflowService(session).view(workflow_id, user_id=current_user.id)
     except WorkflowNotFound as exc:
         raise HTTPException(status_code=404, detail="Workflow not found") from exc
 
@@ -47,31 +48,31 @@ async def get_workflow(
 @router.get("/{workflow_id}/steps", response_model=list[WorkflowStepView])
 async def get_workflow_steps(
     workflow_id: str,
-    user_id: str = Query(...),
+    current_user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[WorkflowStepView]:
-    workflow = await _owned_workflow(session, workflow_id, user_id)
+    workflow = await _owned_workflow(session, workflow_id, current_user.id)
     return workflow_view(workflow, await WorkflowRepository(session).list_steps(workflow.id)).steps
 
 
 @router.get("/{workflow_id}/artifacts", response_model=list[WorkflowArtifactView])
 async def get_workflow_artifacts(
     workflow_id: str,
-    user_id: str = Query(...),
+    current_user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[WorkflowArtifactView]:
-    workflow = await _owned_workflow(session, workflow_id, user_id)
+    workflow = await _owned_workflow(session, workflow_id, current_user.id)
     return [artifact_view(item) for item in await WorkflowRepository(session).list_artifacts(workflow.id)]
 
 
 @router.get("/{workflow_id}/events")
 async def stream_workflow_events(
     workflow_id: str,
-    user_id: str = Query(...),
+    current_user: CurrentUser = Depends(get_current_user),
     last_event_id: str | None = Header(None, alias="Last-Event-ID"),
     session: AsyncSession = Depends(get_session),
 ) -> StreamingResponse:
-    await _owned_workflow(session, workflow_id, user_id)
+    await _owned_workflow(session, workflow_id, current_user.id)
     try:
         cursor = int(last_event_id or 0)
     except ValueError as exc:
@@ -85,7 +86,7 @@ async def stream_workflow_events(
             terminal = False
             async with get_session_factory()() as poll_session:
                 repository = WorkflowRepository(poll_session)
-                workflow = await repository.get(workflow_id, user_id=user_id)
+                workflow = await repository.get(workflow_id, user_id=current_user.id)
                 rows = await repository.list_events(workflow_id, after_id=cursor)
                 terminal = workflow.status in TERMINAL_WORKFLOW_STATUSES
             for row in rows:
@@ -109,11 +110,11 @@ async def stream_workflow_events(
 async def submit_workflow_input(
     workflow_id: str,
     request: WorkflowInputSubmission,
-    user_id: str = Query(...),
+    current_user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> WorkflowActionResult:
     repository = WorkflowRepository(session)
-    workflow = await _owned_workflow(session, workflow_id, user_id)
+    workflow = await _owned_workflow(session, workflow_id, current_user.id)
     step = await repository.get_step(request.step_id, workflow_id=workflow.id)
     if step.status != StepStatus.NEEDS_INPUT.value:
         raise HTTPException(status_code=409, detail="Step is not waiting for input")
@@ -144,11 +145,11 @@ async def submit_workflow_input(
 @router.post("/{workflow_id}/cancel", response_model=WorkflowActionResult)
 async def cancel_workflow(
     workflow_id: str,
-    user_id: str = Query(...),
+    current_user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> WorkflowActionResult:
     repository = WorkflowRepository(session)
-    workflow = await _owned_workflow(session, workflow_id, user_id)
+    workflow = await _owned_workflow(session, workflow_id, current_user.id)
     if workflow.status in TERMINAL_WORKFLOW_STATUSES:
         return WorkflowActionResult(workflow_id=workflow.id, status=workflow.status, changed=False)
     changed = await repository.transition_workflow(workflow, WorkflowStatus.CANCEL_REQUESTED)
@@ -172,11 +173,11 @@ async def cancel_workflow(
 @router.post("/{workflow_id}/retry", response_model=WorkflowActionResult)
 async def retry_workflow(
     workflow_id: str,
-    user_id: str = Query(...),
+    current_user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> WorkflowActionResult:
     repository = WorkflowRepository(session)
-    workflow = await _owned_workflow(session, workflow_id, user_id)
+    workflow = await _owned_workflow(session, workflow_id, current_user.id)
     if workflow.status not in {"failed", "partial_failed", "dead_lettered"}:
         raise HTTPException(status_code=409, detail="Workflow is not retryable")
     await repository.transition_workflow(workflow, WorkflowStatus.RUNNING)
@@ -193,11 +194,11 @@ async def retry_workflow(
 async def retry_workflow_step(
     workflow_id: str,
     step_id: str,
-    user_id: str = Query(...),
+    current_user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> WorkflowActionResult:
     repository = WorkflowRepository(session)
-    workflow = await _owned_workflow(session, workflow_id, user_id)
+    workflow = await _owned_workflow(session, workflow_id, current_user.id)
     step = await repository.get_step(step_id, workflow_id=workflow.id)
     if step.status not in {StepStatus.FAILED.value, StepStatus.DEAD_LETTERED.value}:
         raise HTTPException(status_code=409, detail="Step is not retryable")

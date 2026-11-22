@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: study-api, namespace: study-assistant}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: study-api}}
+  template:
+    metadata: {labels: {app: study-api}}
+    spec:
+      containers:
+        - name: api
+          image: registry.example/study-assistant:RELEASE
+          args: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+          ports: [{name: http, containerPort: 8000}]
+          envFrom: [{secretRef: {name: study-runtime-secrets}}]
+          env:
+            - {name: APP_ENV, value: production}
+            - {name: RABBITMQ_VHOST, value: study-production}
+            - {name: RABBITMQ_DECLARE_TOPOLOGY, value: "false"}
+            - {name: RABBITMQ_WORKFLOW_ENABLED, value: "true"}
+            - name: RABBITMQ_URL
+              valueFrom: {secretKeyRef: {name: study-runtime-secrets, key: rabbitmq_api_url}}
+          readinessProbe: {httpGet: {path: /api/health, port: http}, initialDelaySeconds: 5}
+          livenessProbe: {httpGet: {path: /api/health, port: http}, initialDelaySeconds: 20}
+          resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {cpu: "1", memory: 1Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: study-api, namespace: study-assistant}
+spec:
+  selector: {app: study-api}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: study-api, namespace: study-assistant}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: study-api}
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 65}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: study-orchestrator, namespace: study-assistant}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: study-orchestrator}}
+  template:
+    metadata: {labels: {app: study-orchestrator}}
+    spec:
+      containers:
+        - name: orchestrator
+          image: registry.example/study-assistant:RELEASE
+          args: ["python", "-m", "app.workflows.main"]
+          envFrom: [{secretRef: {name: study-runtime-secrets}}]
+          env:
+            - {name: APP_ENV, value: production}
+            - {name: RABBITMQ_VHOST, value: study-production}
+            - {name: RABBITMQ_DECLARE_TOPOLOGY, value: "false"}
+            - {name: RABBITMQ_WORKFLOW_ENABLED, value: "true"}
+            - name: RABBITMQ_URL
+              valueFrom: {secretKeyRef: {name: study-runtime-secrets, key: rabbitmq_worker_url}}
+          resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {cpu: "1", memory: 1Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: study-outbox-publisher, namespace: study-assistant}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: study-outbox-publisher}}
+  template:
+    metadata: {labels: {app: study-outbox-publisher}}
+    spec:
+      containers:
+        - name: publisher
+          image: registry.example/study-assistant:RELEASE
+          args: ["python", "-m", "app.outbox.main"]
+          envFrom: [{secretRef: {name: study-runtime-secrets}}]
+          env:
+            - {name: APP_ENV, value: production}
+            - {name: RABBITMQ_VHOST, value: study-production}
+            - {name: RABBITMQ_DECLARE_TOPOLOGY, value: "false"}
+            - {name: RABBITMQ_WORKFLOW_ENABLED, value: "true"}
+            - name: RABBITMQ_URL
+              valueFrom: {secretKeyRef: {name: study-runtime-secrets, key: rabbitmq_publisher_url}}
+          resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: "1", memory: 512Mi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: study-scheduler, namespace: study-assistant}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: study-scheduler}}
+  template:
+    metadata: {labels: {app: study-scheduler}}
+    spec:
+      containers:
+        - name: scheduler
+          image: registry.example/study-assistant:RELEASE
+          args: ["python", "-m", "app.scheduler.main"]
+          envFrom: [{secretRef: {name: study-runtime-secrets}}]
+          env:
+            - {name: APP_ENV, value: production}
+            - {name: RABBITMQ_VHOST, value: study-production}
+            - {name: RABBITMQ_DECLARE_TOPOLOGY, value: "false"}
+            - {name: RABBITMQ_WORKFLOW_ENABLED, value: "true"}
+            - name: RABBITMQ_URL
+              valueFrom: {secretKeyRef: {name: study-runtime-secrets, key: rabbitmq_api_url}}
+          resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: 500m, memory: 512Mi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: study-assignment-worker, namespace: study-assistant}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: study-assignment-worker}}
+  template:
+    metadata: {labels: {app: study-assignment-worker}}
+    spec:
+      containers:
+        - name: worker
+          image: registry.example/study-assistant:RELEASE
+          args: ["python", "-m", "app.workers.main", "--queue", "study.assignment.q"]
+          envFrom: [{secretRef: {name: study-runtime-secrets}}]
+          env:
+            - {name: APP_ENV, value: production}
+            - {name: RABBITMQ_VHOST, value: study-production}
+            - {name: RABBITMQ_DECLARE_TOPOLOGY, value: "false"}
+            - {name: RABBITMQ_WORKFLOW_ENABLED, value: "true"}
+            - name: RABBITMQ_URL
+              valueFrom: {secretKeyRef: {name: study-runtime-secrets, key: rabbitmq_worker_url}}
+          resources: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "4", memory: 4Gi}}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: study-assignment-worker, namespace: study-assistant}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: study-assignment-worker}
+  minReplicas: 1
+  maxReplicas: 8
+  behavior: {scaleDown: {stabilizationWindowSeconds: 600}}
+  metrics:
+    - type: External
+      external:
+        metric: {name: rabbitmq_queue_messages_ready, selector: {matchLabels: {queue: study.assignment.q}}}
+        target: {type: AverageValue, averageValue: "2"}

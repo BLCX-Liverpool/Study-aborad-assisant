@@ -27,7 +27,9 @@ export function ExecutionPlanPanel({ plan }: ExecutionPlanPanelProps) {
               <span>{step.intent_name}</span>
               <strong>{step.status}</strong>
             </div>
-            {step.condition ? <p>{step.condition}</p> : null}
+            {step.condition ? (
+              <p>{typeof step.condition === "string" ? step.condition : JSON.stringify(step.condition)}</p>
+            ) : null}
             {step.depends_on.length ? <p>Depends on: {step.depends_on.join(", ")}</p> : null}
             {step.result_summary ? <p>{step.result_summary}</p> : null}
           </article>

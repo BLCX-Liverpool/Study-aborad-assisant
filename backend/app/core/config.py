@@ -23,10 +23,15 @@ class Settings(BaseSettings):
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
     rabbitmq_vhost: str = "/"
     rabbitmq_workflow_enabled: bool = False
+    legacy_long_task_endpoints_enabled: bool = False
     rabbitmq_queue_type: str = "quorum"
+    rabbitmq_declare_topology: bool = True
     rabbitmq_heartbeat_seconds: int = 30
     rabbitmq_connection_timeout_seconds: int = 10
     rabbitmq_message_max_bytes: int = 131_072
+    rabbitmq_single_active_consumer_queues: list[str] = Field(
+        default_factory=lambda: ["study.workflow.prepare.q", "study.orchestrator.events.q"]
+    )
     async_intents: list[str] = Field(
         default_factory=lambda: [
             "assignment",
@@ -46,6 +51,8 @@ class Settings(BaseSettings):
     workflow_outbox_batch_size: int = 100
     workflow_scheduler_poll_seconds: float = 10.0
     admin_api_key: str = ""
+    auth_token_secret: str = "development-only-change-me"
+    auth_token_ttl_seconds: int = 86_400
 
     llm_provider: str = "openai_compatible"
     llm_model: str = "gpt-4o-mini"
@@ -87,6 +94,13 @@ class Settings(BaseSettings):
 
     upload_storage_dir: Path = Path("./.data/uploads")
     research_source_storage_dir: Path = Path("./.data/research_sources")
+
+    rabbitmq_management_url: str = ""
+    rabbitmq_management_username: str = ""
+    rabbitmq_management_password: str = ""
+    observability_outbox_age_alert_seconds: int = 120
+    observability_stale_heartbeat_seconds: int = 90
+    observability_queue_depth_alert: int = 100
 
 
 @lru_cache

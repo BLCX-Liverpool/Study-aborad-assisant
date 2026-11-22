@@ -1,0 +1,145 @@
+apiVersion: rabbitmq.com/v1beta1
+kind: RabbitmqCluster
+metadata:
+  name: study-rabbitmq
+  namespace: study-assistant
+spec:
+  replicas: 3
+  persistence:
+    storageClassName: encrypted-rwo
+    storage: 20Gi
+  tls:
+    secretName: study-rabbitmq-tls
+    caSecretName: study-rabbitmq-ca
+    disableNonTLSListeners: true
+  rabbitmq:
+    additionalConfig: |
+      default_vhost = study-production
+      default_queue_type = quorum
+      consumer_timeout = 1800000
+      prometheus.return_per_object_metrics = true
+  override:
+    statefulSet:
+      spec:
+        template:
+          spec:
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchLabels:
+                        app.kubernetes.io/name: study-rabbitmq
+                    topologyKey: kubernetes.io/hostname
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: study-rabbitmq
+  namespace: study-assistant
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: study-rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Vhost
+metadata:
+  name: study-production
+  namespace: study-assistant
+spec:
+  name: study-production
+  rabbitmqClusterReference:
+    name: study-rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: User
+metadata:
+  name: study-api-user
+  namespace: study-assistant
+spec:
+  tags: []
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: User
+metadata:
+  name: study-publisher-user
+  namespace: study-assistant
+spec:
+  tags: []
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: User
+metadata:
+  name: study-worker-user
+  namespace: study-assistant
+spec:
+  tags: []
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: User
+metadata:
+  name: study-monitor-user
+  namespace: study-assistant
+spec:
+  tags: [monitoring]
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Permission
+metadata:
+  name: study-api-permission
+  namespace: study-assistant
+spec:
+  vhost: study-production
+  userReference: {name: study-api-user}
+  permissions:
+    configure: "^$"
+    write: "^study\\.agent\\.commands\\.v1$"
+    read: "^$"
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Permission
+metadata:
+  name: study-publisher-permission
+  namespace: study-assistant
+spec:
+  vhost: study-production
+  userReference: {name: study-publisher-user}
+  permissions:
+    configure: "^$"
+    write: "^study\\.agent\\.(commands|events)\\.v1$"
+    read: "^$"
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Permission
+metadata:
+  name: study-worker-permission
+  namespace: study-assistant
+spec:
+  vhost: study-production
+  userReference: {name: study-worker-user}
+  permissions:
+    configure: "^$"
+    write: "^study\\.agent\\.events\\.v1$"
+    read: "^study\\..*\\.q$"
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Permission
+metadata:
+  name: study-monitor-permission
+  namespace: study-assistant
+spec:
+  vhost: study-production
+  userReference: {name: study-monitor-user}
+  permissions:
+    configure: "^$"
+    write: "^$"
+    read: ".*"
+  rabbitmqClusterReference: {name: study-rabbitmq}

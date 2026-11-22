@@ -5,10 +5,12 @@ from app.messaging.connection import rabbitmq_manager
 from app.messaging.consumer import RabbitMQConsumer
 from app.workflows.runtime import WorkflowEventRuntime, WorkflowPrepareRuntime
 from app.messaging.dead_letter import DeadLetterRuntime
+from app.core.config import get_settings
 
 
 async def run() -> None:
-    await rabbitmq_manager.declare_topology()
+    if get_settings().rabbitmq_declare_topology:
+        await rabbitmq_manager.declare_topology()
     prepare_runtime = WorkflowPrepareRuntime()
     event_runtime = WorkflowEventRuntime()
     dead_letter_runtime = DeadLetterRuntime()

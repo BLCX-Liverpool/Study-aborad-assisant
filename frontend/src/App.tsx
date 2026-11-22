@@ -32,7 +32,9 @@ import {
   indexSelectedArxivSources,
   rejectMemoryCandidates,
   sendChatMessage,
-  waitForWorkflow
+  submitWorkflowInput,
+  waitForWorkflow,
+  WorkflowNeedsInputError
 } from "./lib/api";
 import type {
   ActionItem,
@@ -50,7 +52,10 @@ import type {
   SocialContentOutput,
   TraceStep,
   TraceWaterfallResponse,
-  UploadedFile
+  UploadedFile,
+  WorkflowAccepted,
+  WorkflowArtifactView,
+  WorkflowView
 } from "./types";
 
 const userId = "local_user";
@@ -98,6 +103,15 @@ export function App() {
   const [activeConversationId, setActiveConversationId] = useState(initialConversation.id);
   const [chatLoading, setChatLoading] = useState(false);
   const [workflowProgress, setWorkflowProgress] = useState<string | null>(null);
+  const [workflowState, setWorkflowState] = useState<WorkflowView | null>(null);
+  const [workflowArtifacts, setWorkflowArtifacts] = useState<WorkflowArtifactView[]>([]);
+  const [pendingWorkflow, setPendingWorkflow] = useState<{
+    accepted: WorkflowAccepted;
+    sessionId: string;
+    prompt: string;
+    lastEventId?: string;
+  } | null>(null);
+  const [workflowInput, setWorkflowInput] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
   const [traceError, setTraceError] = useState<string | null>(null);
@@ -175,6 +189,9 @@ export function App() {
     }));
     setChatLoading(true);
     setWorkflowProgress("Submitting request...");
+    setWorkflowState(null);
+    setWorkflowArtifacts([]);
+    setPendingWorkflow(null);
     setChatError(null);
 
     try {
@@ -195,34 +212,79 @@ export function App() {
       });
 
       const completedResponse = response.mode === "async"
-        ? await waitForWorkflow(response, userId, (eventName) => setWorkflowProgress(formatWorkflowProgress(eventName)))
+        ? await waitForWorkflow(response, userId, (eventName, state, artifacts) => {
+            setWorkflowProgress(formatWorkflowProgress(eventName));
+            if (state) setWorkflowState(state);
+            if (artifacts) setWorkflowArtifacts(artifacts);
+          })
         : response;
-
-      const assistantMessage: ConversationMessage = {
-        id: createMessageId("assistant"),
-        role: "assistant",
-        content: completedResponse.final_response,
-        createdAt: new Date().toISOString(),
-        response: completedResponse
-      };
-
-      patchSession(session.id, (current) => ({
-        ...current,
-        chatResponse: completedResponse,
-        messages: [...current.messages, assistantMessage],
-        title: deriveSessionTitle(current, completedResponse.final_response, message),
-        traceQuery: completedResponse.trace_id,
-        traceWaterfall: null,
-        researchIndexingResult: null
-      }));
-      await loadTraceWaterfall(completedResponse.trace_id, session.id);
-      await loadMemoryReview();
+      await completeConversation(session.id, message, completedResponse);
     } catch (error) {
-      setChatError(error instanceof Error ? error.message : "Chat request failed");
-      patchSession(session.id, (current) => ({
-        ...current,
-        activeMessage: message
-      }));
+      if (error instanceof WorkflowNeedsInputError) {
+        setWorkflowState(error.state);
+        setWorkflowArtifacts(error.artifacts);
+        setPendingWorkflow({ accepted: error.workflow, sessionId: session.id, prompt: message, lastEventId: error.lastEventId });
+        setWorkflowProgress("Waiting for additional information...");
+      } else {
+        setChatError(error instanceof Error ? error.message : "Chat request failed");
+        patchSession(session.id, (current) => ({ ...current, activeMessage: message }));
+      }
+    } finally {
+      setChatLoading(false);
+      setWorkflowProgress(null);
+    }
+  }
+
+  async function completeConversation(sessionId: string, prompt: string, completedResponse: ChatApiResponse) {
+    const assistantMessage: ConversationMessage = {
+      id: createMessageId("assistant"), role: "assistant",
+      content: completedResponse.final_response, createdAt: new Date().toISOString(),
+      response: completedResponse
+    };
+    patchSession(sessionId, (current) => ({
+      ...current,
+      chatResponse: completedResponse,
+      messages: [...current.messages, assistantMessage],
+      title: deriveSessionTitle(current, completedResponse.final_response, prompt),
+      traceQuery: completedResponse.trace_id,
+      traceWaterfall: null,
+      researchIndexingResult: null
+    }));
+    setPendingWorkflow(null);
+    setWorkflowInput("");
+    await loadTraceWaterfall(completedResponse.trace_id, sessionId);
+    await loadMemoryReview();
+  }
+
+  async function resumePendingWorkflow() {
+    if (!pendingWorkflow || !workflowState || !workflowInput.trim()) return;
+    const step = workflowState.steps.find((item) => item.status === "needs_input");
+    if (!step) return;
+    setChatLoading(true);
+    setChatError(null);
+    try {
+      const values: Record<string, unknown> = { provided_information: workflowInput.trim() };
+      for (const field of step.missing_information) values[field] = workflowInput.trim();
+      await submitWorkflowInput(pendingWorkflow.accepted, step.id, step.agent_intent, values);
+      const completed = await waitForWorkflow(
+        pendingWorkflow.accepted,
+        userId,
+        (eventName, state, artifacts) => {
+          setWorkflowProgress(formatWorkflowProgress(eventName));
+          if (state) setWorkflowState(state);
+          if (artifacts) setWorkflowArtifacts(artifacts);
+        },
+        pendingWorkflow.lastEventId
+      );
+      await completeConversation(pendingWorkflow.sessionId, pendingWorkflow.prompt, completed);
+    } catch (error) {
+      if (error instanceof WorkflowNeedsInputError) {
+        setWorkflowState(error.state);
+        setWorkflowArtifacts(error.artifacts);
+        setPendingWorkflow((current) => current ? { ...current, lastEventId: error.lastEventId } : current);
+      } else {
+        setChatError(error instanceof Error ? error.message : "Workflow resume failed");
+      }
     } finally {
       setChatLoading(false);
       setWorkflowProgress(null);
@@ -385,6 +447,31 @@ export function App() {
                 <Loader2 className="spin" size={16} />
                 <span>{workflowProgress ?? "Analyzing and routing your task..."}</span>
               </div>
+            </div>
+          ) : null}
+          {workflowState ? (
+            <div className="workflow-runtime-card">
+              <div className="workflow-runtime-header">
+                <strong>Workflow · {workflowState.status}</strong>
+                <span>{workflowState.progress}%</span>
+              </div>
+              <div className="workflow-progress-track"><span style={{ width: `${workflowState.progress}%` }} /></div>
+              {workflowState.steps.map((step) => (
+                <div className="workflow-step-row" key={step.id}>
+                  <div><strong>{step.agent_intent}</strong><small>{step.status} · attempt {step.attempt_count}/{step.max_attempts}</small></div>
+                  <div>{step.result_summary || step.last_error_message || step.missing_information.join(", ")}</div>
+                </div>
+              ))}
+              {workflowArtifacts.length ? (
+                <div className="workflow-artifacts">Partial artifacts: {workflowArtifacts.map((item) => item.name).join(", ")}</div>
+              ) : null}
+              {pendingWorkflow ? (
+                <div className="workflow-input-form">
+                  <label htmlFor="workflow-input">Additional information required</label>
+                  <textarea id="workflow-input" value={workflowInput} onChange={(event) => setWorkflowInput(event.target.value)} />
+                  <button type="button" onClick={() => void resumePendingWorkflow()} disabled={!workflowInput.trim() || chatLoading}>Resume workflow</button>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </section>

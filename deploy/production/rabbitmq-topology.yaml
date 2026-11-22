@@ -1,0 +1,209 @@
+apiVersion: rabbitmq.com/v1beta1
+kind: Exchange
+metadata: {name: study-agent-commands, namespace: study-assistant}
+spec:
+  name: study.agent.commands.v1
+  vhost: study-production
+  type: topic
+  durable: true
+  autoDelete: false
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Exchange
+metadata: {name: study-agent-events, namespace: study-assistant}
+spec:
+  name: study.agent.events.v1
+  vhost: study-production
+  type: topic
+  durable: true
+  autoDelete: false
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Exchange
+metadata: {name: study-agent-dlx, namespace: study-assistant}
+spec:
+  name: study.agent.dlx.v1
+  vhost: study-production
+  type: topic
+  durable: true
+  autoDelete: false
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Policy
+metadata: {name: study-dead-lettering, namespace: study-assistant}
+spec:
+  name: study-dead-lettering
+  vhost: study-production
+  pattern: "^study\\.(workflow|assignment|travel|finance|fitness|planner|email|notice|social|wellbeing|orchestrator)\\..*\\.q$"
+  applyTo: queues
+  definition:
+    dead-letter-exchange: study.agent.dlx.v1
+    delivery-limit: 4
+  priority: 10
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata: {name: study-workflow-prepare-q, namespace: study-assistant}
+spec:
+  name: study.workflow.prepare.q
+  vhost: study-production
+  durable: true
+  arguments: {x-queue-type: quorum, x-single-active-consumer: true}
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata: {name: study-assignment-q, namespace: study-assistant}
+spec:
+  name: study.assignment.q
+  vhost: study-production
+  durable: true
+  arguments: {x-queue-type: quorum}
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata: {name: study-travel-q, namespace: study-assistant}
+spec: {name: study.travel.q, vhost: study-production, durable: true, arguments: {x-queue-type: quorum}, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata: {name: study-finance-q, namespace: study-assistant}
+spec: {name: study.finance.q, vhost: study-production, durable: true, arguments: {x-queue-type: quorum}, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata: {name: study-fitness-q, namespace: study-assistant}
+spec: {name: study.fitness.q, vhost: study-production, durable: true, arguments: {x-queue-type: quorum}, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata: {name: study-planner-q, namespace: study-assistant}
+spec: {name: study.planner.q, vhost: study-production, durable: true, arguments: {x-queue-type: quorum}, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata: {name: study-email-q, namespace: study-assistant}
+spec: {name: study.email.q, vhost: study-production, durable: true, arguments: {x-queue-type: quorum}, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata: {name: study-notice-q, namespace: study-assistant}
+spec: {name: study.notice.q, vhost: study-production, durable: true, arguments: {x-queue-type: quorum}, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata: {name: study-social-q, namespace: study-assistant}
+spec: {name: study.social.q, vhost: study-production, durable: true, arguments: {x-queue-type: quorum}, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata: {name: study-wellbeing-q, namespace: study-assistant}
+spec: {name: study.wellbeing.q, vhost: study-production, durable: true, arguments: {x-queue-type: quorum}, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata: {name: study-orchestrator-events-q, namespace: study-assistant}
+spec:
+  name: study.orchestrator.events.q
+  vhost: study-production
+  durable: true
+  arguments: {x-queue-type: quorum, x-single-active-consumer: true}
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata: {name: study-dead-q, namespace: study-assistant}
+spec: {name: study.dead.q, vhost: study-production, durable: true, arguments: {x-queue-type: quorum}, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: workflow-prepare-binding, namespace: study-assistant}
+spec:
+  source: study.agent.commands.v1
+  destination: study.workflow.prepare.q
+  destinationType: queue
+  routingKey: workflow.prepare
+  vhost: study-production
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: assignment-binding, namespace: study-assistant}
+spec: {source: study.agent.commands.v1, destination: study.assignment.q, destinationType: queue, routingKey: agent.task.assignment, vhost: study-production, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: travel-binding, namespace: study-assistant}
+spec: {source: study.agent.commands.v1, destination: study.travel.q, destinationType: queue, routingKey: agent.task.travel, vhost: study-production, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: finance-binding, namespace: study-assistant}
+spec: {source: study.agent.commands.v1, destination: study.finance.q, destinationType: queue, routingKey: agent.task.finance, vhost: study-production, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: fitness-binding, namespace: study-assistant}
+spec: {source: study.agent.commands.v1, destination: study.fitness.q, destinationType: queue, routingKey: agent.task.fitness, vhost: study-production, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: planner-binding, namespace: study-assistant}
+spec: {source: study.agent.commands.v1, destination: study.planner.q, destinationType: queue, routingKey: agent.task.planner, vhost: study-production, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: email-binding, namespace: study-assistant}
+spec: {source: study.agent.commands.v1, destination: study.email.q, destinationType: queue, routingKey: agent.task.email, vhost: study-production, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: notice-binding, namespace: study-assistant}
+spec: {source: study.agent.commands.v1, destination: study.notice.q, destinationType: queue, routingKey: agent.task.notice, vhost: study-production, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: social-binding, namespace: study-assistant}
+spec: {source: study.agent.commands.v1, destination: study.social.q, destinationType: queue, routingKey: agent.task.social, vhost: study-production, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: wellbeing-binding, namespace: study-assistant}
+spec: {source: study.agent.commands.v1, destination: study.wellbeing.q, destinationType: queue, routingKey: agent.task.wellbeing, vhost: study-production, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: agent-events-binding, namespace: study-assistant}
+spec:
+  source: study.agent.events.v1
+  destination: study.orchestrator.events.q
+  destinationType: queue
+  routingKey: agent.step.*
+  vhost: study-production
+  rabbitmqClusterReference: {name: study-rabbitmq}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: artifact-events-binding, namespace: study-assistant}
+spec: {source: study.agent.events.v1, destination: study.orchestrator.events.q, destinationType: queue, routingKey: artifact.created, vhost: study-production, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: workflow-events-binding, namespace: study-assistant}
+spec: {source: study.agent.events.v1, destination: study.orchestrator.events.q, destinationType: queue, routingKey: workflow.completed, vhost: study-production, rabbitmqClusterReference: {name: study-rabbitmq}}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata: {name: dead-letter-binding, namespace: study-assistant}
+spec:
+  source: study.agent.dlx.v1
+  destination: study.dead.q
+  destinationType: queue
+  routingKey: "#"
+  vhost: study-production
+  rabbitmqClusterReference: {name: study-rabbitmq}

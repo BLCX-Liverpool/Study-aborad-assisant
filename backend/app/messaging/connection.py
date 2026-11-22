@@ -62,6 +62,8 @@ class RabbitMQConnectionManager:
             queue_arguments: dict[str, str | int] = {}
             if settings.rabbitmq_queue_type:
                 queue_arguments["x-queue-type"] = settings.rabbitmq_queue_type
+            if spec.name in settings.rabbitmq_single_active_consumer_queues:
+                queue_arguments["x-single-active-consumer"] = True
             if spec.name != "study.dead.q":
                 queue_arguments.update(
                     {

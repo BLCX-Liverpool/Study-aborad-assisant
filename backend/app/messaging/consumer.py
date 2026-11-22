@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from aio_pika.abc import AbstractIncomingMessage
+from aio_pika.exceptions import AMQPConnectionError, ChannelClosed
+from pydantic import ValidationError
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.messaging.connection import rabbitmq_manager
 from app.messaging.topology import queue_spec
@@ -32,9 +35,11 @@ class RabbitMQConsumer:
     async def _on_message(self, message: AbstractIncomingMessage) -> None:
         try:
             await self.handler(message)
-        except Exception:
+        except Exception as exc:
+            if is_transient_consumer_error(exc):
+                await message.nack(requeue=True)
+                return
             await message.reject(requeue=False)
-            raise
         else:
             await message.ack()
 
@@ -43,3 +48,11 @@ class RabbitMQConsumer:
             await self._queue.cancel(self._consumer_tag)
         if self._channel is not None and not self._channel.is_closed:
             await self._channel.close()
+
+
+def is_transient_consumer_error(error: Exception) -> bool:
+    if isinstance(error, ValidationError):
+        return False
+    if isinstance(error, (OperationalError, DBAPIError, AMQPConnectionError, ChannelClosed)):
+        return True
+    return isinstance(error, (ConnectionError, TimeoutError, OSError))

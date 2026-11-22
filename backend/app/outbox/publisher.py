@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from time import perf_counter
+
 from app.core.config import get_settings
 from app.messaging.publisher import RabbitMQPublisher
 from app.outbox.repository import OutboxRepository
@@ -14,6 +16,7 @@ class OutboxPublisher:
         events = await self.repository.claim_batch(limit=get_settings().workflow_outbox_batch_size)
         published = 0
         for event in events:
+            started = perf_counter()
             try:
                 await self.publisher.publish(
                     routing_key=event.routing_key,
@@ -27,6 +30,9 @@ class OutboxPublisher:
                     attempt_count=event.attempt_count,
                 )
             else:
-                await self.repository.mark_published(event.id)
+                await self.repository.mark_published(
+                    event.id,
+                    publish_latency_ms=round((perf_counter() - started) * 1000, 3),
+                )
                 published += 1
         return published

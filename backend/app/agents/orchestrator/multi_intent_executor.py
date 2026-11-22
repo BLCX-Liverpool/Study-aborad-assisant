@@ -94,6 +94,7 @@ def _step_for_intent(index: int, intent: StructuredIntent, agent_inputs: dict[st
         agent_intent=intent.agent_intent,
         status=status,
         depends_on=intent.depends_on,
+        dependency_type=intent.dependency_type,
         condition=intent.condition,
         slots=slots,
         missing_slots=missing_slots,

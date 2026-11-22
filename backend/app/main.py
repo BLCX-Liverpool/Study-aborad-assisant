@@ -18,6 +18,8 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    if settings.app_env.lower() in {"production", "prod"} and settings.auth_token_secret == "development-only-change-me":
+        raise RuntimeError("AUTH_TOKEN_SECRET must be configured in production")
 
     app = FastAPI(
         title=settings.app_name,

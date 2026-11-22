@@ -13,13 +13,18 @@ from app.db.models import (
     EmailSendAttempt,
     MessageInbox,
     OutboxEvent,
+    Reminder,
+    ReminderStatus,
     RunStatus,
+    TraceSpan,
     WorkflowRun,
     WorkflowStep,
 )
 from app.schemas.email import EmailSendRequest
+from app.api.routes.dead_letters import replay_dead_letter
 from app.schemas.messages import AgentStepEvent, AgentTaskCommand
 from app.scheduler.stale_run_recovery import StaleRunRecovery
+from app.scheduler.reminder_scheduler import ReminderScheduler
 from app.workers.result_service import WorkerResultService
 from app.workers.task_handler import WorkerTaskHandler
 from app.workflows.event_handler import WorkflowEventHandler
@@ -106,6 +111,7 @@ async def test_email_workflow_is_durable_and_idempotent() -> None:
                 (AgentArtifactRecord, 1),
                 (AgentRun, 1),
                 (EmailSendAttempt, 1),
+                (TraceSpan, 1),
             ):
                 count = await session.scalar(
                     select(func.count()).select_from(model).where(model.user_id == user_id)
@@ -120,6 +126,170 @@ async def test_email_workflow_is_durable_and_idempotent() -> None:
             assert inbox_count == 2
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_conditioned_dependency_and_approved_reminder_delivery_close_the_loop() -> None:
+    database_url = os.environ["DATABASE_URL"]
+    engine = create_async_engine(database_url, pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    token = uuid4().hex
+    user_id = f"condition-reminder-{token}"
+    try:
+        async with session_factory() as session:
+            repository = WorkflowRepository(session)
+            workflow = await repository.create(
+                user_id=user_id,
+                conversation_id=f"condition-{token}",
+                trace_id=str(uuid4()),
+                request_id=f"condition-{token}",
+                workflow_type="test",
+                input_json={"chat_request": {}},
+            )
+            steps = await repository.create_steps(workflow.id, [
+                {"index": 0, "intent_name": "source", "agent_intent": "travel"},
+                {"index": 1, "intent_name": "success-branch", "agent_intent": "finance", "depends_on": [0], "condition": {"result_contains": "approved"}},
+                {"index": 2, "intent_name": "closed-branch", "agent_intent": "finance", "depends_on": [0], "condition": {"result_contains": "rejected"}},
+            ])
+            await repository.transition_step(steps[0], StepStatus.QUEUED)
+            await repository.transition_step(steps[0], StepStatus.RUNNING)
+            await repository.transition_step(steps[0], StepStatus.COMPLETED, result_summary="approved route")
+            ready = await repository.ready_steps(workflow.id)
+            assert [item.id for item in ready] == [steps[1].id]
+            assert await repository.cancel_blocked_steps(workflow.id) == 1
+            await session.refresh(steps[2])
+            assert steps[2].last_error_code == "dependency_condition_not_met"
+
+            reminder = Reminder(
+                user_id=user_id,
+                remind_at=datetime.now(UTC) - timedelta(seconds=1),
+                channel="email",
+                recipient_email="student@example.com",
+                delivery_approved=True,
+                approved_at=datetime.now(UTC),
+                idempotency_key=f"reminder:{token}",
+            )
+            session.add(reminder)
+            await session.commit()
+            assert await ReminderScheduler(session).enqueue_due() == 1
+            reminder_workflow = await repository.get_by_request_id(
+                user_id=user_id, request_id=f"reminder:{reminder.id}"
+            )
+            assert reminder_workflow is not None
+            task_outbox = (
+                await session.execute(select(OutboxEvent).where(
+                    OutboxEvent.message_type == "agent.task.requested",
+                    OutboxEvent.payload_json["workflow_id"].as_string() == reminder_workflow.id,
+                ))
+            ).scalars().one()
+            command = AgentTaskCommand.model_validate(task_outbox.payload_json)
+            await WorkerTaskHandler(session, consumer_name=f"reminder-worker-{token}").handle(command)
+            await session.refresh(reminder)
+            assert reminder.status == ReminderStatus.SENT
+            assert reminder.sent_at is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dead_letter_replay_works_without_original_outbox_row() -> None:
+    database_url = os.environ["DATABASE_URL"]
+    engine = create_async_engine(database_url, pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    token = uuid4().hex
+    message_id = f"external-dead-{token}"
+    try:
+        async with session_factory() as session:
+            session.add(MessageInbox(
+                consumer_name="study.dead.q",
+                message_id=message_id,
+                workflow_id=f"workflow-{token}",
+                status="dead_lettered",
+                received_at=datetime.now(UTC),
+                processed_at=datetime.now(UTC),
+                routing_key="workflow.prepare",
+                message_type="workflow.prepare",
+                payload_json={
+                    "schema_version": 1,
+                    "message_id": message_id,
+                    "message_type": "workflow.prepare",
+                    "workflow_id": f"workflow-{token}",
+                    "trace_id": f"trace-{token}",
+                    "input_ref": f"workflow-input:workflow-{token}",
+                    "created_at": datetime.now(UTC).isoformat(),
+                },
+                headers_json={"original": True},
+            ))
+            await session.commit()
+            result = await replay_dead_letter(message_id, session)
+            assert result.status == "replay_queued"
+            replay = await session.get(OutboxEvent, result.new_message_id)
+            assert replay is not None
+            assert replay.payload_json["causation_id"] == message_id
+            assert replay.headers_json["replayed_from"] == message_id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_completion_event_and_api_restart_are_idempotent() -> None:
+    database_url = os.environ["DATABASE_URL"]
+    first_engine = create_async_engine(database_url, pool_pre_ping=True)
+    first_factory = async_sessionmaker(first_engine, expire_on_commit=False)
+    token = uuid4().hex
+    async with first_factory() as session:
+        repository = WorkflowRepository(session)
+        workflow = await repository.create(
+            user_id=f"restart-user-{token}", conversation_id=f"restart-{token}",
+            trace_id=str(uuid4()), request_id=f"restart-{token}", workflow_type="test",
+            input_json={"chat_request": {}},
+        )
+        await repository.transition_workflow(workflow, WorkflowStatus.PLANNING)
+        step = (await repository.create_steps(workflow.id, [
+            {"index": 0, "intent_name": "done", "agent_intent": "travel"}
+        ]))[0]
+        await repository.transition_workflow(workflow, WorkflowStatus.RUNNING)
+        await repository.transition_step(step, StepStatus.QUEUED)
+        await repository.transition_step(step, StepStatus.RUNNING)
+        await repository.transition_step(step, StepStatus.COMPLETED, result_summary="durable result")
+        await session.commit()
+        workflow_id, step_id, trace_id = workflow.id, step.id, workflow.trace_id
+    await first_engine.dispose()
+
+    # A brand-new engine/session represents an API/process restart.
+    second_engine = create_async_engine(database_url, pool_pre_ping=True)
+    second_factory = async_sessionmaker(second_engine, expire_on_commit=False)
+    event = AgentStepEvent(
+        message_id=f"concurrent-complete-{token}",
+        message_type="agent.step.completed",
+        workflow_id=workflow_id,
+        step_id=step_id,
+        agent="travel",
+        trace_id=trace_id,
+        result_summary="durable result",
+    )
+
+    async def consume() -> None:
+        async with second_factory() as session:
+            await WorkflowEventHandler(session, consumer_name=f"complete-consumer-{token}").handle(event)
+
+    try:
+        await asyncio.gather(consume(), consume())
+        async with second_factory() as session:
+            restored = await WorkflowRepository(session).get(workflow_id)
+            assert restored.status == "completed"
+            inbox_count = await session.scalar(select(func.count()).select_from(MessageInbox).where(
+                MessageInbox.consumer_name == f"complete-consumer-{token}",
+                MessageInbox.message_id == event.message_id,
+            ))
+            completion_count = await session.scalar(select(func.count()).select_from(OutboxEvent).where(
+                OutboxEvent.aggregate_id == workflow_id,
+                OutboxEvent.message_type == "workflow.completed",
+            ))
+            assert inbox_count == 1
+            assert completion_count == 1
+    finally:
+        await second_engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -183,7 +353,7 @@ async def test_failed_dependency_cancels_blocked_branch_and_yields_partial_failu
             await session.refresh(workflow)
             await session.refresh(steps[1])
             assert steps[1].status == "cancelled"
-            assert steps[1].last_error_code == "dependency_failed"
+            assert steps[1].last_error_code == "dependency_condition_not_met"
             assert workflow.status == "partial_failed"
             assert workflow.final_response == "Independent branch completed."
     finally:

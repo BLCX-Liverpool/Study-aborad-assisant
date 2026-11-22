@@ -174,7 +174,7 @@ class WorkflowService:
                     "agent_intent": "email_send",
                     "status": "planned",
                     "slots": request.model_dump(mode="json"),
-                    "max_attempts": 3,
+                    "max_attempts": 4,
                 }
             ],
         ))[0]
@@ -303,7 +303,8 @@ def artifact_view(record) -> WorkflowArtifactView:
         kind=record.kind,
         schema_version=record.schema_version,
         payload=record.payload_json,
-        storage_uri=record.storage_uri,
+        # Never expose an internal filesystem/object-store URI through the API.
+        storage_uri=None,
         checksum=record.checksum,
         size_bytes=record.size_bytes,
         created_at=record.created_at,

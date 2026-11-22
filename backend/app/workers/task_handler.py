@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import httpx
@@ -14,7 +15,7 @@ from app.agents.orchestrator.workers import WorkerRegistry
 from app.agents.orchestrator.workers import WorkerRunResult
 from app.agents.email.repository import EmailSendAuditRepository
 from app.agents.email.service import EmailAgentService
-from app.db.models import AgentRun, RunStatus, WorkflowRun
+from app.db.models import AgentRun, Reminder, ReminderStatus, RunStatus, User, WorkflowRun
 from app.schemas.email import EmailSendRequest
 from app.schemas.chat import AgentArtifact
 from app.core.config import get_settings
@@ -120,10 +121,19 @@ class WorkerTaskHandler:
                 await self._raise_if_cancelled(workflow.id, "email send")
                 request_payload = workflow.input_json["chat_request"]["agent_inputs"]["email_send"]
                 send_request = EmailSendRequest.model_validate(request_payload)
-                send_result = await EmailAgentService(
-                    audit_repository=EmailSendAuditRepository(self.session)
-                ).send(send_request)
-                if send_result.status == "requires_approval":
+                reminder = await self._validated_reminder(send_request)
+                if reminder is not None and reminder.status == ReminderStatus.SENT:
+                    send_result = None
+                    result = WorkerRunResult(
+                        final_response="提醒邮件此前已发送；本次消息按幂等规则跳过。",
+                    )
+                else:
+                    send_result = await EmailAgentService(
+                        audit_repository=EmailSendAuditRepository(self.session)
+                    ).send(send_request)
+                if send_result is None:
+                    pass
+                elif send_result.status == "requires_approval":
                     result = WorkerRunResult(
                         final_response="邮件发送仍需要用户显式审批。",
                         missing_information=["email.approval"],
@@ -132,6 +142,9 @@ class WorkerTaskHandler:
                 elif send_result.status != "sent":
                     raise ConnectionError(send_result.error or "Email provider did not confirm delivery")
                 else:
+                    if reminder is not None:
+                        reminder.status = ReminderStatus.SENT
+                        reminder.sent_at = send_result.sent_at or datetime.now(UTC)
                     result = WorkerRunResult(
                         final_response="邮件已按批准内容发送。",
                         artifacts=[
@@ -149,6 +162,10 @@ class WorkerTaskHandler:
                     workflow=workflow,
                     step=step,
                 )
+            except OperationalError:
+                await heartbeat.stop()
+                await self.session.rollback()
+                raise
             except Exception as exc:
                 await heartbeat.stop()
                 await result_service.persist_failure(
@@ -191,6 +208,10 @@ class WorkerTaskHandler:
                 workflow=workflow,
                 step=step,
             )
+        except OperationalError:
+            await heartbeat.stop()
+            await self.session.rollback()
+            raise
         except Exception as exc:
             await heartbeat.stop()
             await result_service.persist_failure(
@@ -215,6 +236,26 @@ class WorkerTaskHandler:
         )
         if status in {WorkflowStatus.CANCEL_REQUESTED.value, WorkflowStatus.CANCELLED.value}:
             raise asyncio.CancelledError(f"Workflow cancellation requested before {boundary}")
+
+    async def _validated_reminder(self, request: EmailSendRequest) -> Reminder | None:
+        if request.source_type != "reminder":
+            return None
+        if not request.source_id:
+            raise PermissionError("Reminder email has no source reminder")
+        reminder = await self.session.get(Reminder, request.source_id)
+        if reminder is None or reminder.user_id != request.user_id:
+            raise PermissionError("Reminder no longer exists or belongs to another user")
+        user = await self.session.get(User, reminder.user_id)
+        expected_recipient = reminder.recipient_email or (user.email if user else None)
+        if not reminder.delivery_approved or reminder.approved_at is None:
+            raise PermissionError("Reminder delivery has not been explicitly approved")
+        if expected_recipient != request.to_email:
+            raise PermissionError("Reminder recipient changed after approval")
+        if reminder.status not in {ReminderStatus.PENDING, ReminderStatus.SENT}:
+            raise PermissionError(f"Reminder is no longer deliverable: {reminder.status}")
+        if reminder.status == ReminderStatus.PENDING and reminder.remind_at > datetime.now(UTC):
+            raise PermissionError("Reminder is not due yet")
+        return reminder
 
 
 def is_retryable_error(error: Exception) -> bool:

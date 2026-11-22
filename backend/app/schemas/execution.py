@@ -15,7 +15,8 @@ class ExecutionStep(BaseModel):
     agent_intent: str
     status: ExecutionStepStatus
     depends_on: list[int] = Field(default_factory=list)
-    condition: str | None = None
+    dependency_type: Literal["success", "completion", "failure"] = "success"
+    condition: str | dict[str, Any] | None = None
     slots: dict = Field(default_factory=dict)
     missing_slots: list[str] = Field(default_factory=list)
     result_summary: str | None = None

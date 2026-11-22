@@ -8,8 +8,10 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 
 
-CURRENT_MESSAGE_SCHEMA_VERSION = 1
-SUPPORTED_MESSAGE_SCHEMA_VERSIONS = {1}
+CURRENT_MESSAGE_SCHEMA_VERSION = 2
+# Producers emit v2 while consumers continue accepting the immediately previous
+# version during rolling deployments.
+SUPPORTED_MESSAGE_SCHEMA_VERSIONS = {1, 2}
 
 
 def utc_now() -> datetime:

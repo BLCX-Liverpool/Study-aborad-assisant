@@ -1,0 +1,73 @@
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: study-runtime-secrets
+  namespace: study-assistant
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {name: platform-secrets, kind: ClusterSecretStore}
+  target: {name: study-runtime-secrets}
+  dataFrom:
+    - extract: {key: study-assistant/production}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: study-general-worker
+  namespace: study-assistant
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: study-general-worker}}
+  template:
+    metadata: {labels: {app: study-general-worker}}
+    spec:
+      containers:
+        - name: worker
+          image: registry.example/study-assistant:RELEASE
+          args: ["python", "-m", "app.workers.main", "--queue", "study.travel.q", "--queue", "study.finance.q", "--queue", "study.planner.q", "--queue", "study.email.q", "--queue", "study.notice.q", "--queue", "study.social.q"]
+          envFrom: [{secretRef: {name: study-runtime-secrets}}]
+          env:
+            - {name: APP_ENV, value: production}
+            - {name: RABBITMQ_VHOST, value: study-production}
+            - {name: RABBITMQ_DECLARE_TOPOLOGY, value: "false"}
+            - {name: RABBITMQ_WORKFLOW_ENABLED, value: "true"}
+            - name: RABBITMQ_URL
+              valueFrom: {secretKeyRef: {name: study-runtime-secrets, key: rabbitmq_worker_url}}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: study-general-worker
+  namespace: study-assistant
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: study-general-worker}
+  minReplicas: 2
+  maxReplicas: 20
+  behavior:
+    scaleDown: {stabilizationWindowSeconds: 300}
+  metrics:
+    - type: External
+      external:
+        metric: {name: rabbitmq_queue_messages_ready, selector: {matchLabels: {vhost: study-production}}}
+        target: {type: AverageValue, averageValue: "20"}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: study-runtime-egress
+  namespace: study-assistant
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress-system}}}]
+  egress:
+    - to: [{podSelector: {matchLabels: {app.kubernetes.io/name: study-rabbitmq}}}]
+      ports: [{protocol: TCP, port: 5671}]
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: data-services}}}]

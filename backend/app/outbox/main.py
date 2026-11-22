@@ -9,7 +9,8 @@ from app.outbox.repository import OutboxRepository
 
 
 async def run() -> None:
-    await rabbitmq_manager.declare_topology()
+    if get_settings().rabbitmq_declare_topology:
+        await rabbitmq_manager.declare_topology()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

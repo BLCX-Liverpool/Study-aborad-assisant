@@ -14,7 +14,12 @@ class ReminderWorker:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def due_reminders(self, now: datetime | None = None, limit: int = 50) -> list[DueReminder]:
+    async def due_reminders(
+        self,
+        now: datetime | None = None,
+        limit: int = 50,
+        user_id: str | None = None,
+    ) -> list[DueReminder]:
         now = now or datetime.now(UTC)
         statement = (
             select(Reminder)
@@ -22,6 +27,8 @@ class ReminderWorker:
             .order_by(Reminder.remind_at)
             .limit(limit)
         )
+        if user_id is not None:
+            statement = statement.where(Reminder.user_id == user_id)
         result = await self.session.execute(statement)
         reminders = list(result.scalars().all())
         return [
@@ -50,8 +57,17 @@ class ReminderWorker:
         await self.session.commit()
         return count
 
-    async def email_queue(self, now: datetime | None = None, limit: int = 50) -> list[EmailReminderQueueItem]:
-        due = await self.due_reminders(now=now, limit=limit)
+    async def email_queue(
+        self,
+        now: datetime | None = None,
+        limit: int = 50,
+        user_id: str | None = None,
+    ) -> list[EmailReminderQueueItem]:
+        due = (
+            await self.due_reminders(now=now, limit=limit, user_id=user_id)
+            if user_id is not None
+            else await self.due_reminders(now=now, limit=limit)
+        )
         return [
             EmailReminderQueueItem(
                 reminder_id=reminder.id,

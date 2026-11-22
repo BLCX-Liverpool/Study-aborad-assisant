@@ -50,23 +50,35 @@ async def replay_dead_letter(
     session: AsyncSession = Depends(get_session),
 ) -> DeadLetterActionResult:
     original = await session.get(OutboxEvent, message_id)
+    dead_record = None
     if original is None:
-        raise HTTPException(status_code=404, detail="Original outbox message is unavailable")
+        dead_record = await session.scalar(
+            select(MessageInbox).where(
+                MessageInbox.message_id == message_id,
+                MessageInbox.status == "dead_lettered",
+            ).order_by(MessageInbox.received_at.desc()).limit(1)
+        )
+        if dead_record is None or not dead_record.payload_json or not dead_record.routing_key:
+            raise HTTPException(status_code=404, detail="Dead-letter payload is unavailable")
     new_id = str(uuid4())
     payload = {
-        **original.payload_json,
+        **(original.payload_json if original is not None else dead_record.payload_json),
         "message_id": new_id,
         "causation_id": message_id,
     }
+    workflow_id = str(payload.get("workflow_id") or "dead-letter")
     session.add(
         OutboxEvent(
             id=new_id,
-            aggregate_type=original.aggregate_type,
-            aggregate_id=original.aggregate_id,
-            message_type=original.message_type,
-            routing_key=original.routing_key,
+            aggregate_type=original.aggregate_type if original is not None else "dead_letter_replay",
+            aggregate_id=original.aggregate_id if original is not None else workflow_id,
+            message_type=original.message_type if original is not None else str(dead_record.message_type or payload.get("message_type") or "unknown"),
+            routing_key=original.routing_key if original is not None else str(dead_record.routing_key),
             payload_json=payload,
-            headers_json={**(original.headers_json or {}), "replayed_from": message_id},
+            headers_json={
+                **((original.headers_json if original is not None else dead_record.headers_json) or {}),
+                "replayed_from": message_id,
+            },
             status="pending",
         )
     )

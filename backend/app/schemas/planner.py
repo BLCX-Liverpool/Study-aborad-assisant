@@ -129,3 +129,15 @@ class EmailReminderSendResponse(BaseModel):
     sent: list[EmailSendResult] = Field(default_factory=list)
     skipped: list[EmailSendResult] = Field(default_factory=list)
     marked_sent_count: int = 0
+
+
+class ReminderApprovalRequest(BaseModel):
+    recipient_email: str
+    approved: bool = True
+
+
+class ReminderApprovalResponse(BaseModel):
+    reminder_id: str
+    status: str
+    delivery_approved: bool
+    recipient_email: str | None = None
