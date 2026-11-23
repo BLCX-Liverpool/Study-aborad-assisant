@@ -720,6 +720,36 @@ class GeneralChatWorker:
         )
 
 
+class UnsafeRequestWorker:
+    spec = WorkerAgentSpec(
+        intent="unsafe_request",
+        input_schema="ChatRequest",
+        output_artifact_kind=None,
+        memory_namespaces=[],
+    )
+
+    async def run(self, context: WorkerContext) -> WorkerRunResult:
+        return WorkerRunResult(
+            final_response="我不能协助侵犯隐私、窃取凭据或其他可能伤害他人的请求。可以改为讨论合法、安全的替代方案。",
+            trace_events=[{"name": "orchestrator.unsafe_request_refused", "payload": {}}],
+        )
+
+
+class SystemCommandWorker:
+    spec = WorkerAgentSpec(
+        intent="system_command",
+        input_schema="ChatRequest",
+        output_artifact_kind=None,
+        memory_namespaces=[],
+    )
+
+    async def run(self, context: WorkerContext) -> WorkerRunResult:
+        return WorkerRunResult(
+            final_response="我不会执行覆盖系统指令、越权或破坏性命令；请描述你希望安全完成的实际任务。",
+            trace_events=[{"name": "orchestrator.system_command_rejected", "payload": {}}],
+        )
+
+
 def build_default_workers() -> list[WorkerAgent]:
     return [
         WellbeingWorker(),
@@ -732,6 +762,8 @@ def build_default_workers() -> list[WorkerAgent]:
         AssignmentWorker(),
         NoticeActionWorker(),
         GeneralChatWorker(),
+        UnsafeRequestWorker(),
+        SystemCommandWorker(),
     ]
 
 

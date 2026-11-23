@@ -62,7 +62,7 @@ async def test_orchestrator_returns_multi_intent_execution_artifact() -> None:
 @pytest.mark.asyncio
 async def test_orchestrator_executes_multi_worker_plan_with_artifact_handoff() -> None:
     class FakeRouter:
-        async def route_async(self, message, uploaded_file_ids=None, agent_inputs=None):
+        async def route_async(self, message, uploaded_file_ids=None, agent_inputs=None, conversation_context=None):
             return RouterOutput(
                 primary_intent="travel",
                 confidence=0.86,
@@ -183,7 +183,7 @@ async def test_orchestrator_executes_multi_worker_plan_with_artifact_handoff() -
 @pytest.mark.asyncio
 async def test_orchestrator_runs_independent_worker_steps_in_parallel() -> None:
     class FakeRouter:
-        async def route_async(self, message, uploaded_file_ids=None, agent_inputs=None):
+        async def route_async(self, message, uploaded_file_ids=None, agent_inputs=None, conversation_context=None):
             return RouterOutput(
                 primary_intent="travel",
                 confidence=0.9,

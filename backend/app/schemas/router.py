@@ -40,9 +40,13 @@ class IntentFusionMetadata(BaseModel):
     embedding_confidence: float = 0.0
     llm_primary: str | None = None
     llm_confidence: float = 0.0
-    fusion_strategy: str = "embedding_only"
+    fusion_strategy: str = "embedding_coarse_only"
     disagreement: bool = False
     uncertainty_reason: str | None = None
+    rule_candidates: list[str] = Field(default_factory=list)
+    embedding_candidates: list[str] = Field(default_factory=list)
+    llm_candidates: list[str] = Field(default_factory=list)
+    context_used: bool = False
     raw_sources: dict = Field(default_factory=dict)
 
 

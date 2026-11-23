@@ -33,6 +33,9 @@ class DurableWorkflowPlanner:
 
         request = ChatRequest.model_validate(workflow.input_json["chat_request"])
         router_json = workflow.input_json.get("router_output")
+        # The API persists its synchronous safety/policy route so the durable
+        # orchestrator can reuse it as the initial route without a duplicate
+        # model call. Planning and dispatch still happen only in this runtime.
         router_output = (
             RouterOutput.model_validate(router_json)
             if router_json
@@ -40,6 +43,7 @@ class DurableWorkflowPlanner:
                 request.message,
                 uploaded_file_ids=request.uploaded_file_ids,
                 agent_inputs=request.agent_inputs,
+                conversation_context=request.history,
             )
         )
         memory_context = None
@@ -49,6 +53,15 @@ class DurableWorkflowPlanner:
                 conversation_id=workflow.conversation_id,
                 router_output=router_output,
             )
+            # Match the synchronous LangGraph path: a context-resolved query
+            # must be routed again before the execution plan is materialized.
+            if memory_context.query_rewrite.changed:
+                router_output = await self.router.route_async(
+                    memory_context.query_rewrite.rewritten_query,
+                    uploaded_file_ids=request.uploaded_file_ids,
+                    agent_inputs=request.agent_inputs,
+                    conversation_context=memory_context.prompt_context,
+                )
         plan = _execution_plan(request, router_output)
         workflow.plan_json = {
             "router": router_output.model_dump(mode="json"),

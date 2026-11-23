@@ -16,7 +16,7 @@ class FakeRouter:
     def __init__(self) -> None:
         self.async_calls = 0
 
-    async def route_async(self, message, uploaded_file_ids=None, agent_inputs=None):
+    async def route_async(self, message, uploaded_file_ids=None, agent_inputs=None, conversation_context=None):
         self.async_calls += 1
         return RouterOutput(primary_intent="travel", confidence=0.91)
 

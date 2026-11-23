@@ -159,6 +159,7 @@ class OrchestratorGraphRuntime:
                 request.message,
                 uploaded_file_ids=request.uploaded_file_ids,
                 agent_inputs=request.agent_inputs,
+                conversation_context=state.messages[:-1],
             )
             span_output["primary_intent"] = router_output.primary_intent
             span_output["confidence"] = router_output.confidence
@@ -211,6 +212,7 @@ class OrchestratorGraphRuntime:
                     memory_context.query_rewrite.rewritten_query,
                     uploaded_file_ids=request.uploaded_file_ids,
                     agent_inputs=request.agent_inputs,
+                    conversation_context=memory_context.prompt_context,
                 )
                 span_output["primary_intent"] = router_output.primary_intent
                 span_output["confidence"] = router_output.confidence
@@ -288,6 +290,17 @@ class OrchestratorGraphRuntime:
         router_output = graph_state["router_output"]
         if state.execution_plan and state.execution_plan.steps:
             return await self._dispatch_execution_plan(graph_state)
+
+        if router_output.primary_intent == "clarification_required":
+            questions = list(router_output.clarification_questions) or ["请说明你希望我处理的具体事项。"]
+            result = WorkerRunResult(
+                final_response="为了继续处理，请补充以下信息：" + "；".join(questions),
+                missing_information=questions,
+                next_actions=questions,
+                trace_events=[{"name": "router.clarification_requested", "payload": {"questions": questions}}],
+            )
+            _apply_worker_result(state, result, agent_name="clarification_required")
+            return {**graph_state, "agent_state": state, "worker_result": result}
 
         intent = router_output.primary_intent
         state.add_trace("orchestrator.dispatch", {"intent": intent})
