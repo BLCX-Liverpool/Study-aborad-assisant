@@ -21,19 +21,24 @@ class SocialCopyGenerator:
 def _title(request: SocialContentRequest, platform: SocialPlatform, variant: str) -> str | None:
     if platform == "wechat_moments":
         return None
+    if platform == "xiaohongshu":
+        travel_title = _xiaohongshu_travel_title(request.key_points, variant)
+        if travel_title:
+            return travel_title
+    topic = _compact_topic(request.topic, 18 if platform == "xiaohongshu" else 36)
     if request.language == "en":
-        return f"{request.topic}: a {variant} student-life note"
+        return f"{topic}: a {variant} student-life note"
     if platform == "linkedin":
-        return f"{request.topic}｜留学生经验复盘"
+        return f"{topic}｜留学生经验复盘"
     if variant == "practical":
-        return f"{request.topic}｜可照做清单"
+        return f"{topic}｜实用攻略"
     if variant == "storytelling":
-        return f"{request.topic}｜从手忙脚乱到有节奏"
-    return f"{request.topic}｜留学生真实记录"
+        return f"{topic}｜真实旅行记录"
+    return f"{topic}｜留学生真实记录"
 
 
 def _body(request: SocialContentRequest, platform: SocialPlatform, variant: str) -> str:
-    points = request.key_points or ["发生了什么", "我学到什么", "下次会怎么做"]
+    points = request.key_points or _points_from_topic(request.topic)
     audience = request.audience or "同样在海外学习生活的人"
     if request.language == "en":
         return _english_body(request, platform, points, audience, variant)
@@ -63,6 +68,43 @@ def _xiaohongshu_body(request: SocialContentRequest, points: list[str], audience
         "留学生活很多时候不是一步到位，而是不断把混乱整理成可执行的小动作。",
     ]
     return "\n".join(lines)
+
+
+def _compact_topic(topic: str, limit: int) -> str:
+    compact = topic.strip(" ，,。")
+    for marker in ("请你帮我", "请帮我", "帮我写", "麻烦帮我"):
+        if marker in compact:
+            compact = compact.split(marker, 1)[0].strip(" ，,。")
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip(" ，,。")
+
+
+def _xiaohongshu_travel_title(points: list[str], variant: str) -> str | None:
+    destination = next((point.removeprefix("去了").strip() for point in points if point.startswith("去了")), "")
+    highlights = [
+        point.removeprefix("参观了").removeprefix("打卡了").strip()
+        for point in points
+        if point.startswith(("参观了", "打卡了"))
+    ]
+    highlights = [item for item in highlights if item]
+    if not destination or not highlights:
+        return None
+    joined = "和".join(highlights[:2])
+    label = {
+        "practical": "旅行攻略",
+        "storytelling": "旅行实录",
+        "concise": "旅行速记",
+        "reflective": "旅行回忆",
+    }.get(variant, "旅行记录")
+    title = f"{destination}{label}｜{joined}"
+    return title if len(title) <= 24 else f"{destination}{label}｜{joined[: max(6, 23 - len(destination + label))]}"
+
+
+def _points_from_topic(topic: str) -> list[str]:
+    clauses = [item.strip(" ，,。") for item in topic.replace("，", "。").split("。")]
+    concrete = [item for item in clauses if item]
+    return concrete[:3] or ["记录这次经历", "整理值得分享的细节", "补充自己的真实感受"]
 
 
 def _moments_body(request: SocialContentRequest, points: list[str], variant: str) -> str:

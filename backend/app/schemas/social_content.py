@@ -75,4 +75,7 @@ class SocialContentOutput(BaseModel):
     memory_candidates: list[SocialMemoryCandidate] = Field(default_factory=list)
     memory_confirmation: MemoryCandidatePersistResponse | None = None
     assumptions: list[str] = Field(default_factory=list)
+    generation_mode: Literal["llm", "deterministic_fallback"] = "deterministic_fallback"
+    fallback_used: bool = True
+    generation_error: str | None = None
     disclaimer: str = "This is writing support. Review privacy, accuracy, and platform rules before posting."

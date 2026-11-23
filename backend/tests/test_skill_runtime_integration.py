@@ -20,6 +20,19 @@ class CapturingLlm:
         return ChatResponse(content=json.dumps(self.payload), model="fake")
 
 
+class SequencedLlm:
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        payload = self.payloads[min(len(self.requests) - 1, len(self.payloads) - 1)]
+        if isinstance(payload, Exception):
+            raise payload
+        return ChatResponse(content=json.dumps(payload), model="fake")
+
+
 def test_skill_loader_reads_social_skill_and_references() -> None:
     skill = SkillLoader().load("social-content-writing", include_references=True)
 
@@ -56,6 +69,110 @@ async def test_social_llm_generator_injects_social_content_skill() -> None:
     assert drafts[0].variant == "skill_guided"
     assert "Social Content Writing Skill" in llm.requests[0].messages[0].content
     assert "privacy_rules" in llm.requests[0].messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_social_llm_generator_normalizes_string_list_fields() -> None:
+    llm = CapturingLlm(
+        {
+            "drafts": [
+                {
+                    "platform": "小红书",
+                    "variant": "balanced",
+                    "title": "约克旅行",
+                    "body": "逛了肉铺街，也参观了约克大教堂。",
+                    "hashtags": "#约克旅行 #英国留学",
+                    "call_to_action": "收藏备用",
+                    "platform_fit_notes": "短段落，适合小红书阅读",
+                }
+            ]
+        }
+    )
+
+    drafts = await LlmSocialCopyGenerator(llm=llm).generate(
+        SocialContentRequest(
+            user_id="user_1",
+            topic="约克旅行",
+            platform="xiaohongshu",
+            draft_count=1,
+        ),
+        "xiaohongshu",
+        PlatformStandard(platform="xiaohongshu", recommended_length="short"),
+    )
+
+    assert drafts[0].platform == "xiaohongshu"
+    assert drafts[0].hashtags == ["约克旅行", "英国留学"]
+    assert drafts[0].platform_fit_notes == ["短段落，适合小红书阅读"]
+    assert len(llm.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_social_llm_generator_repairs_invalid_draft_once() -> None:
+    llm = SequencedLlm(
+        [
+            {"drafts": [{"platform": "xiaohongshu", "title": "缺少正文"}]},
+            {
+                "drafts": [
+                    {
+                        "platform": "xiaohongshu",
+                        "variant": "repaired",
+                        "title": "约克旅行",
+                        "body": "肉铺街和约克大教堂都值得慢慢逛。",
+                        "hashtags": ["约克旅行"],
+                        "platform_fit_notes": ["已修复字段类型"],
+                    }
+                ]
+            },
+        ]
+    )
+
+    drafts = await LlmSocialCopyGenerator(llm=llm).generate(
+        SocialContentRequest(
+            user_id="user_1",
+            topic="约克旅行",
+            platform="xiaohongshu",
+            draft_count=1,
+        ),
+        "xiaohongshu",
+        PlatformStandard(platform="xiaohongshu", recommended_length="short"),
+    )
+
+    assert drafts[0].variant == "repaired"
+    assert len(llm.requests) == 2
+    assert "校验错误" in llm.requests[1].messages[-1].content
+
+
+@pytest.mark.asyncio
+async def test_social_llm_generator_keeps_valid_drafts_when_repair_call_fails() -> None:
+    llm = SequencedLlm(
+        [
+            {
+                "drafts": [
+                    {
+                        "platform": "xiaohongshu",
+                        "body": "这是一条有效草稿。",
+                        "platform_fit_notes": "经验感",
+                    },
+                    {"platform": "xiaohongshu", "title": "缺少正文"},
+                ]
+            },
+            RuntimeError("repair unavailable"),
+        ]
+    )
+
+    drafts = await LlmSocialCopyGenerator(llm=llm).generate(
+        SocialContentRequest(
+            user_id="user_1",
+            topic="约克旅行",
+            platform="xiaohongshu",
+            draft_count=2,
+        ),
+        "xiaohongshu",
+        PlatformStandard(platform="xiaohongshu", recommended_length="short"),
+    )
+
+    assert len(drafts) == 1
+    assert drafts[0].body == "这是一条有效草稿。"
 
 
 @pytest.mark.asyncio

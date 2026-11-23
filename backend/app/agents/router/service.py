@@ -130,6 +130,10 @@ class RuleIntentClassifier:
             intents.append(_structured_intent_for(message, intent, confidence, source="rule"))
             matches[intent] = list(dict.fromkeys(matched))
 
+        if _is_conversation_recall_query(message):
+            intents.insert(0, _structured_intent_for(message, "general_chat", 0.96, source="rule:conversation_recall"))
+            matches["general_chat"] = ["conversation_recall"]
+
         intents.sort(
             key=lambda item: (
                 item.agent_intent not in {"task_planning", "general_chat"},
@@ -586,6 +590,8 @@ def _apply_policy_overrides(message: str, intents: list[StructuredIntent]) -> li
     if signal == "system_command":
         system = _structured_intent_for(message, "system_command", 0.98, source="policy:safety")
         return [system, *[item for item in intents if item.agent_intent != "system_command"]]
+    if _is_conversation_recall_query(message):
+        return [_structured_intent_for(message, "general_chat", 0.98, source="policy:conversation_recall")]
     return _dedupe_intents(intents)
 
 
@@ -672,6 +678,24 @@ def _safety_signal(message: str) -> str | None:
     if any(signal in lowered for signal in ("人肉", "隐私曝光", "dox", "泄露隐私", "偷取密码", "窃取凭据")):
         return "unsafe_request"
     return None
+
+
+def _is_conversation_recall_query(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        signal in lowered
+        for signal in (
+            "上次的提问",
+            "上次问了",
+            "上一次问",
+            "刚才问",
+            "之前问",
+            "我问过什么",
+            "what did i ask",
+            "my previous question",
+            "my last question",
+        )
+    )
 
 
 def _wellbeing_risk_level(message: str) -> str:

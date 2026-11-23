@@ -53,6 +53,10 @@ services:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       RABBITMQ_WORKFLOW_ENABLED: "true"
       RABBITMQ_QUEUE_TYPE: quorum
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      ALL_PROXY: "${ALL_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,postgres,redis,rabbitmq,api,orchestrator}"
     ports:
       - "8000:8000"
     depends_on:

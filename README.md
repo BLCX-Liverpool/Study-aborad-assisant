@@ -205,6 +205,21 @@ cp backend/.env.example backend/.env
 docker compose -f docker-compose.rabbitmq.yml up --build
 ```
 
+如果宿主机能访问 DashScope，但 Docker 容器出现 `SSL: UNEXPECTED_EOF_WHILE_READING`，
+先在宿主机启动仅允许 DashScope 的 CONNECT 桥接器：
+
+```bash
+./.venv/bin/python backend/scripts/llm_connect_proxy.py
+```
+
+然后在 `backend/.env` 中设置：
+
+```env
+LLM_PROXY_URL="http://host.docker.internal:18080"
+```
+
+重新创建 API、Orchestrator 和 Worker 容器后，OpenAI-compatible 客户端会通过宿主机直连。
+
 如本机端口已占用，可通过 `RABBITMQ_PORT`、`RABBITMQ_MANAGEMENT_PORT`、
 `RABBITMQ_METRICS_PORT` 覆盖三个 RabbitMQ 主机端口。应用会在启动时幂等声明
 durable quorum queues、DLX 和 delivery limit；

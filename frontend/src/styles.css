@@ -1519,6 +1519,47 @@ li {
   color: white;
 }
 
+.social-fallback-note {
+  display: grid;
+  gap: 4px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid #e8cf91;
+  border-radius: 10px;
+  background: #fff8e7;
+  color: #6b5320;
+  font-size: 12px;
+}
+
+.social-fallback-note small {
+  color: #806d43;
+  overflow-wrap: anywhere;
+}
+
+.social-draft-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.social-draft-tabs button {
+  padding: 7px 10px;
+  border: 1px solid #d8e2dc;
+  border-radius: 999px;
+  background: #f7faf8;
+  color: #456052;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.social-draft-tabs button.active {
+  border-color: #36745a;
+  background: #e8f2ed;
+  color: #24533f;
+  font-weight: 700;
+}
+
 @media (max-width: 540px) {
   .chat-app-shell {
     grid-template-columns: 1fr;

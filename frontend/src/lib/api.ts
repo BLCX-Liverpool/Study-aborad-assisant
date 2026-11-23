@@ -21,6 +21,17 @@ import type {
 const API_PREFIX = "/api";
 let cachedAuthToken = "";
 
+async function responseError(response: Response, fallback: string): Promise<Error> {
+  let detail = "";
+  try {
+    const payload = await response.json();
+    detail = typeof payload?.detail === "string" ? payload.detail : JSON.stringify(payload?.detail ?? "");
+  } catch {
+    detail = await response.text().catch(() => "");
+  }
+  return new Error(`${fallback}: ${response.status}${detail ? ` · ${detail}` : ""}`);
+}
+
 async function authHeaders(extra: Record<string, string> = {}): Promise<Record<string, string>> {
   let token = cachedAuthToken || sessionStorage.getItem("study_access_token") || "";
   if (!token && import.meta.env.DEV && import.meta.env.VITE_AUTH_TOKEN) {
@@ -130,7 +141,7 @@ export async function sendChatMessage(params: {
   });
 
   if (!response.ok) {
-    throw new Error(`Chat failed: ${response.status}`);
+    throw await responseError(response, "Chat failed");
   }
 
   return response.json();

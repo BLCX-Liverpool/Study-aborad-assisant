@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi.encoders import jsonable_encoder
 
 from app.core.tracing import LatencySpan
 from app.db.models import AgentRun, RouterObservation, RunStatus, TraceSpan
@@ -32,11 +33,13 @@ class AgentRunRecorder:
             conversation_id=conversation_id,
             trace_id=trace_id,
             agent_name=agent_name,
-            input_json={
-                "router": router_output.model_dump(),
-                **input_json,
-            },
-            output_json=output_json,
+            input_json=jsonable_encoder(
+                {
+                    "router": router_output.model_dump(mode="json"),
+                    **input_json,
+                }
+            ),
+            output_json=jsonable_encoder(output_json),
             status=RunStatus.COMPLETED,
             started_at=started_at or now,
             completed_at=completed_at or now,
@@ -44,6 +47,9 @@ class AgentRunRecorder:
         self.session.add(run)
         await self.session.commit()
         return run.id
+
+    async def rollback(self) -> None:
+        await self.session.rollback()
 
 
 class RouterObservationRepository:

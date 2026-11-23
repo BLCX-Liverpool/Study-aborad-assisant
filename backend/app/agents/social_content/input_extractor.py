@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -62,14 +63,18 @@ class SocialContentInputExtractor:
             payload = json.loads(response.content)
         except Exception as exc:
             return SocialContentInputExtraction(
-                payload={},
+                payload=fallback_social_content_payload(message),
                 missing_information=[],
                 clarification_questions=[],
+                assumptions=["Used deterministic social-content extraction because the LLM extractor was unavailable."],
+                confidence=0.55,
                 recoverable_error=str(exc),
                 raw={"input": prompt_payload},
             )
         return SocialContentInputExtraction(
-            payload=payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
+            payload=normalize_social_content_payload(
+                payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+            ),
             missing_information=_string_list(payload.get("missing_information")),
             clarification_questions=_string_list(payload.get("clarification_questions")),
             assumptions=_string_list(payload.get("assumptions")),
@@ -89,3 +94,128 @@ def _coerce_confidence(value: Any) -> float:
         return max(0.0, min(float(value), 1.0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def normalize_social_content_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    platform_aliases = {
+        "小红书": "xiaohongshu",
+        "红书": "xiaohongshu",
+        "rednote": "xiaohongshu",
+        "微信朋友圈": "wechat_moments",
+        "朋友圈": "wechat_moments",
+        "wechat": "wechat_moments",
+        "领英": "linkedin",
+        "通用": "general",
+    }
+    tone_aliases = {
+        "实用": "practical",
+        "温暖": "warm",
+        "温馨": "warm",
+        "活泼": "playful",
+        "俏皮": "playful",
+        "反思": "reflective",
+        "复盘": "reflective",
+        "专业": "professional",
+    }
+    language_aliases = {
+        "中文": "zh",
+        "汉语": "zh",
+        "英文": "en",
+        "英语": "en",
+        "双语": "bilingual",
+        "中英双语": "bilingual",
+    }
+    if isinstance(normalized.get("platform"), str):
+        platform = normalized["platform"].strip()
+        normalized["platform"] = platform_aliases.get(platform.lower(), platform_aliases.get(platform, platform.lower()))
+    if isinstance(normalized.get("tone"), str):
+        tone = normalized["tone"].strip()
+        normalized["tone"] = tone_aliases.get(tone.lower(), tone_aliases.get(tone, tone.lower()))
+    if isinstance(normalized.get("language"), str):
+        language = normalized["language"].strip()
+        normalized["language"] = language_aliases.get(
+            language.lower(), language_aliases.get(language, language.lower())
+        )
+    if normalized.get("platform") not in {"xiaohongshu", "instagram", "wechat_moments", "linkedin", "general"}:
+        normalized.pop("platform", None)
+    if normalized.get("tone") not in {"practical", "warm", "playful", "reflective", "professional"}:
+        normalized.pop("tone", None)
+    if normalized.get("language") not in {"zh", "en", "bilingual"}:
+        normalized.pop("language", None)
+
+    for field in ("topic", "audience", "notes"):
+        value = normalized.get(field)
+        if value is not None and not isinstance(value, str):
+            normalized.pop(field, None)
+    for field in ("key_points", "personal_details"):
+        value = normalized.get(field)
+        if isinstance(value, dict):
+            value = list(value.values())
+        if isinstance(value, list):
+            normalized[field] = [str(item) for item in value if item is not None and item != ""]
+        elif value is not None:
+            normalized.pop(field, None)
+    for field in ("include_hashtags", "save_memory_candidates", "memory_confirmed"):
+        value = normalized.get(field)
+        if not isinstance(value, bool):
+            normalized.pop(field, None)
+    draft_count = normalized.get("draft_count")
+    if draft_count is not None:
+        try:
+            normalized["draft_count"] = max(1, min(int(draft_count), 5))
+        except (TypeError, ValueError):
+            normalized.pop("draft_count", None)
+    return normalized
+
+
+def fallback_social_content_payload(message: str) -> dict[str, Any]:
+    """Extract enough concrete structure to keep the offline fallback useful."""
+    lowered = message.lower()
+    platform = "general"
+    if any(signal in lowered for signal in ("小红书", "xiaohongshu", "rednote")):
+        platform = "xiaohongshu"
+    elif "instagram" in lowered:
+        platform = "instagram"
+    elif any(signal in lowered for signal in ("朋友圈", "wechat moments")):
+        platform = "wechat_moments"
+    elif "linkedin" in lowered:
+        platform = "linkedin"
+
+    tone = "warm"
+    if any(signal in lowered for signal in ("实用", "干货", "清单", "practical")):
+        tone = "practical"
+    elif any(signal in lowered for signal in ("活泼", "俏皮", "playful")):
+        tone = "playful"
+    elif any(signal in lowered for signal in ("复盘", "反思", "reflective")):
+        tone = "reflective"
+    elif any(signal in lowered for signal in ("专业", "professional")):
+        tone = "professional"
+
+    topic = re.split(
+        r"[，,。\s]*(?:请你)?(?:请)?帮我(?:写|整理|生成)|[，,。\s]*麻烦(?:你)?帮我(?:写|整理|生成)",
+        message,
+        maxsplit=1,
+    )[0].strip(" ，,。")
+    if not topic:
+        topic = message.strip()
+
+    key_points: list[str] = []
+    destination = re.search(r"(?:去|前往)([^，。,.]{1,20}?)(?:玩(?:了一圈)?|旅行|旅游|逛)", topic)
+    if destination:
+        key_points.append(f"去了{destination.group(1).strip()}")
+    visited = re.search(r"(?:参观|逛|打卡)(?:了)?([^，。,.]+)", topic)
+    if visited:
+        for place in re.split(r"和|、|以及|及", visited.group(1)):
+            cleaned = place.strip(" ，,。")
+            if cleaned:
+                key_points.append(f"参观了{cleaned}")
+    key_points = list(dict.fromkeys(key_points))
+
+    return {
+        "topic": topic,
+        "platform": platform,
+        "tone": tone,
+        "key_points": key_points,
+        "language": "zh" if re.search(r"[\u4e00-\u9fff]", message) else "en",
+    }

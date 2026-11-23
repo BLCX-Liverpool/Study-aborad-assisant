@@ -36,6 +36,8 @@ class SocialContentAgentService:
             image_generation_tool=_image_tool_design(),
             memory_candidates=_memory_candidates(request, platform),
             assumptions=_assumptions(request),
+            generation_mode="deterministic_fallback",
+            fallback_used=True,
         )
 
     async def create_content_async(self, request: SocialContentRequest) -> SocialContentOutput:
@@ -45,6 +47,8 @@ class SocialContentAgentService:
         drafts = []
         if input_safety.level != "blocked" and self.llm_generator is not None:
             drafts = await self.llm_generator.generate(request, platform, standard)
+        used_fallback = not drafts
+        generation_error = self.llm_generator.last_error if self.llm_generator is not None else "LLM generator is not configured."
         if input_safety.level != "blocked" and not drafts:
             drafts = self.copy_generator.generate(request, platform)
         draft_safety = self.safety_checker.check_drafts(drafts) if drafts else input_safety
@@ -60,6 +64,9 @@ class SocialContentAgentService:
             image_generation_tool=_image_tool_design(),
             memory_candidates=_memory_candidates(request, platform),
             assumptions=_assumptions(request),
+            generation_mode="deterministic_fallback" if used_fallback else "llm",
+            fallback_used=used_fallback,
+            generation_error=generation_error if used_fallback else None,
         )
 
 

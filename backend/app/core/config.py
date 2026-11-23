@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     memory_llm_model: str | None = None
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
+    llm_proxy_url: str | None = None
+    llm_timeout_seconds: float = Field(default=45.0, gt=0)
+    llm_max_retries: int = Field(default=2, ge=0, le=10)
 
     ocr_engine: str = "auto"
     ocr_pdf_render_scale: float = 2.0

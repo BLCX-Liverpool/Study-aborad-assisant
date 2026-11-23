@@ -4,7 +4,24 @@ from app.schemas.chat import ChatTurn
 from app.schemas.memory import TopicContinuityResult
 
 
-CONTINUATION_SIGNALS = ("继续", "刚才", "上面", "那个", "这个", "it", "that", "this", "continue")
+CONTINUATION_SIGNALS = (
+    "继续",
+    "刚才",
+    "刚刚",
+    "上次",
+    "上一次",
+    "之前",
+    "先前",
+    "上面",
+    "那个",
+    "这个",
+    "it",
+    "that",
+    "this",
+    "continue",
+    "previous",
+    "last time",
+)
 NEW_TOPIC_SIGNALS = ("换个话题", "另外", "新的", "new topic", "unrelated")
 
 

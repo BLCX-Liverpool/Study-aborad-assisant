@@ -543,30 +543,38 @@ class OrchestratorGraphRuntime:
         router_output = graph_state["router_output"]
         if not request.persist_agent_runs or self.recorder is None:
             return graph_state
-        async with self._span(
-            state,
-            span_name="agent_run.persist",
-            span_type="db",
-            input_json={"primary_intent": router_output.primary_intent},
-        ) as span_output:
-            run_id = await self.recorder.record_completed_run(
-                user_id=state.user_id,
-                conversation_id=state.conversation_id,
-                trace_id=state.trace_id,
-                agent_name=router_output.primary_intent,
-                router_output=router_output,
-                input_json=request.model_dump(),
-                output_json={
-                    "final_response": state.final_response,
-                    "artifacts": [artifact.model_dump() for artifact in state.artifacts],
-                    "missing_information": state.missing_information,
-                    "next_actions": state.next_actions,
-                    "trace": [event.model_dump() for event in state.trace],
-                },
-                started_at=min((span.started_at for span in state.latency_spans), default=None),
-                completed_at=max((span.completed_at for span in state.latency_spans), default=None),
+        try:
+            async with self._span(
+                state,
+                span_name="agent_run.persist",
+                span_type="db",
+                input_json={"primary_intent": router_output.primary_intent},
+            ) as span_output:
+                run_id = await self.recorder.record_completed_run(
+                    user_id=state.user_id,
+                    conversation_id=state.conversation_id,
+                    trace_id=state.trace_id,
+                    agent_name=router_output.primary_intent,
+                    router_output=router_output,
+                    input_json=request.model_dump(mode="json"),
+                    output_json={
+                        "final_response": state.final_response,
+                        "artifacts": [artifact.model_dump(mode="json") for artifact in state.artifacts],
+                        "missing_information": state.missing_information,
+                        "next_actions": state.next_actions,
+                        "trace": [event.model_dump(mode="json") for event in state.trace],
+                    },
+                    started_at=min((span.started_at for span in state.latency_spans), default=None),
+                    completed_at=max((span.completed_at for span in state.latency_spans), default=None),
+                )
+                span_output["agent_run_id"] = run_id
+        except Exception as exc:
+            await self.recorder.rollback()
+            state.add_trace(
+                "agent_run.persist_failed",
+                {"error_type": type(exc).__name__, "error": str(exc)[:500]},
             )
-            span_output["agent_run_id"] = run_id
+            return {**graph_state, "agent_state": state}
         state.persisted_agent_run_id = run_id
         for span in state.latency_spans:
             span.agent_run_id = run_id

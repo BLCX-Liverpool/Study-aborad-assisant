@@ -451,5 +451,8 @@ export type SocialContentOutput = {
     error?: string | null;
   } | null;
   assumptions: string[];
+  generation_mode: "llm" | "deterministic_fallback";
+  fallback_used: boolean;
+  generation_error?: string | null;
   disclaimer: string;
 };

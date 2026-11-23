@@ -21,7 +21,11 @@ from app.agents.notice.parser import NoticeActionParser
 from app.agents.planner.input_extractor import PlanningInputExtractor
 from app.agents.planner.service import TaskPlannerService
 from app.agents.research.workflow import AssignmentResearchWorkflow
-from app.agents.social_content.input_extractor import SocialContentInputExtractor
+from app.agents.social_content.input_extractor import (
+    SocialContentInputExtractor,
+    fallback_social_content_payload,
+    normalize_social_content_payload,
+)
 from app.agents.social_content.llm_generator import LlmSocialCopyGenerator
 from app.agents.social_content.service import SocialContentAgentService
 from app.agents.travel.input_extractor import TravelInputExtractor
@@ -369,6 +373,14 @@ class SocialContentWorker:
             memory_preferences=_memory_preferences_for(context, ["social_content"]),
         )
         payload = _merge_agent_payloads(extraction.payload, explicit_payload, context.request.user_id)
+        if not extraction.payload:
+            payload = _merge_agent_payloads(
+                fallback_social_content_payload(context.request.message),
+                explicit_payload,
+                context.request.user_id,
+            )
+        payload = normalize_social_content_payload(payload)
+        payload["user_id"] = context.request.user_id
         if context.agent_state is not None:
             context.agent_state.metadata["last_social_content_input_extraction"] = extraction.model_dump()
         if not payload.get("topic"):
@@ -393,6 +405,9 @@ class SocialContentWorker:
                         "extracted": bool(extraction.payload),
                         "extractor_confidence": extraction.confidence,
                         "recoverable_error": extraction.recoverable_error,
+                        "generation_mode": output.generation_mode,
+                        "fallback_used": output.fallback_used,
+                        "generation_error": output.generation_error,
                     },
                 }
             ],
@@ -714,10 +729,61 @@ class GeneralChatWorker:
     )
 
     async def run(self, context: WorkerContext) -> WorkerRunResult:
+        if _is_previous_question_request(context.request.message):
+            recent_messages = (
+                context.memory_context.recent_messages
+                if context.memory_context is not None
+                else context.request.history
+            )
+            previous_question = next(
+                (
+                    turn.content
+                    for turn in reversed(recent_messages)
+                    if turn.role == "user" and turn.content.strip() != context.request.message.strip()
+                ),
+                None,
+            )
+            if previous_question:
+                return WorkerRunResult(
+                    final_response=f"你上次的提问是：\n\n“{previous_question}”",
+                    trace_events=[
+                        {
+                            "name": "orchestrator.conversation_recall",
+                            "payload": {"source": "short_term_memory"},
+                        }
+                    ],
+                )
+            return WorkerRunResult(
+                final_response="当前会话中还没有找到更早的用户提问。",
+                trace_events=[
+                    {
+                        "name": "orchestrator.conversation_recall",
+                        "payload": {"source": "none"},
+                    }
+                ],
+            )
         return WorkerRunResult(
             final_response="我已经收到你的问题。当前统一入口会优先路由到具体 Agent；普通聊天将在多轮对话阶段补强。",
             trace_events=[{"name": "orchestrator.general_chat", "payload": {}}],
         )
+
+
+def _is_previous_question_request(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        signal in lowered
+        for signal in (
+            "上次的提问",
+            "上次问了",
+            "上一次问",
+            "刚才问",
+            "之前问",
+            "我问过什么",
+            "what did i ask",
+            "my previous question",
+            "my last question",
+        )
+    )
 
 
 class UnsafeRequestWorker:

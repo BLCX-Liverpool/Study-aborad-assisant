@@ -48,37 +48,57 @@ class OpenAICompatibleLLM:
         base_url: str,
         default_model: str,
         default_embedding_model: str,
+        proxy_url: str | None = None,
+        timeout_seconds: float = 45.0,
+        max_retries: int = 2,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url
         self.default_model = default_model
         self.default_embedding_model = default_embedding_model
+        self.proxy_url = proxy_url
+        self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
+
+    def _client(self):
+        from openai import AsyncOpenAI
+
+        http_client = None
+        if self.proxy_url:
+            import httpx
+
+            http_client = httpx.AsyncClient(proxy=self.proxy_url, timeout=self.timeout_seconds)
+        return AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout_seconds,
+            max_retries=self.max_retries,
+            http_client=http_client,
+        )
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         if not self.api_key:
             raise RuntimeError("LLM_API_KEY is not configured.")
 
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
         model = request.model or self.default_model
-        async with capture_current_latency_span(
-            span_name="llm.chat",
-            span_type="llm",
-            input_json={
-                "model": model,
-                "message_count": len(request.messages),
-                "response_format": request.response_format,
-            },
-        ) as span_output:
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[message.model_dump() for message in request.messages],
-                temperature=request.temperature,
-                response_format=request.response_format,
-            )
-            span_output["model"] = model
-            span_output["choice_count"] = len(response.choices)
+        async with self._client() as client:
+            async with capture_current_latency_span(
+                span_name="llm.chat",
+                span_type="llm",
+                input_json={
+                    "model": model,
+                    "message_count": len(request.messages),
+                    "response_format": request.response_format,
+                },
+            ) as span_output:
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[message.model_dump() for message in request.messages],
+                    temperature=request.temperature,
+                    response_format=request.response_format,
+                )
+                span_output["model"] = model
+                span_output["choice_count"] = len(response.choices)
         content = response.choices[0].message.content or ""
         return ChatResponse(
             content=content,
@@ -90,24 +110,22 @@ class OpenAICompatibleLLM:
         if not self.api_key:
             raise RuntimeError("LLM_API_KEY is not configured.")
 
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
         model = request.model or self.default_embedding_model
-        async with capture_current_latency_span(
-            span_name="llm.embedding",
-            span_type="llm",
-            input_json={
-                "model": model,
-                "input_count": len(request.inputs),
-            },
-        ) as span_output:
-            response = await client.embeddings.create(
-                model=model,
-                input=request.inputs,
-            )
-            span_output["model"] = model
-            span_output["embedding_count"] = len(response.data)
+        async with self._client() as client:
+            async with capture_current_latency_span(
+                span_name="llm.embedding",
+                span_type="llm",
+                input_json={
+                    "model": model,
+                    "input_count": len(request.inputs),
+                },
+            ) as span_output:
+                response = await client.embeddings.create(
+                    model=model,
+                    input=request.inputs,
+                )
+                span_output["model"] = model
+                span_output["embedding_count"] = len(response.data)
         embeddings = [item.embedding for item in response.data]
         return EmbeddingResponse(
             embeddings=embeddings,
@@ -127,6 +145,9 @@ def get_llm_client(
         base_url=settings.llm_base_url,
         default_model=model or settings.llm_model,
         default_embedding_model=embedding_model or settings.embedding_model,
+        proxy_url=settings.llm_proxy_url,
+        timeout_seconds=settings.llm_timeout_seconds,
+        max_retries=settings.llm_max_retries,
     )
 
 
