@@ -7,7 +7,7 @@ from app.schemas.travel import (
     TravelPlaceSuggestion,
     TravelPlanRequest,
 )
-from app.tools.mcp_adapters import GoogleMapsDirectionsTool, GoogleMapsPlacesTool
+from app.tools.google_maps import GoogleMapsDirectionsTool, GoogleMapsPlacesTool
 from app.tools.models import ToolAvailabilityStatus
 from app.tools.models import ToolCallResult
 

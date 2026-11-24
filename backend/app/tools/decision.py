@@ -178,6 +178,18 @@ def _travel_calls(context: dict[str, Any]) -> list[ToolCallDraft]:
             },
         )
     )
+    notes = str(context.get("notes") or "")
+    if _needs_web_travel_research(notes):
+        calls.append(
+            ToolCallDraft(
+                tool_name="browser.mcp.search",
+                arguments={
+                    "query": f"{destination} student travel recommendations {notes}".strip(),
+                    "search_depth": "basic",
+                    "max_results": 5,
+                },
+            )
+        )
     return calls
 
 
@@ -204,11 +216,40 @@ def _assignment_calls(context: dict[str, Any]) -> list[ToolCallDraft]:
     if not queries:
         query = analysis.get("title") or analysis.get("objective")
         queries = [query] if query else []
-    return [
-        ToolCallDraft(tool_name="research.arxiv.search", arguments={"query": query, "max_results": 3})
-        for query in queries[:5]
-        if query
-    ]
+    calls: list[ToolCallDraft] = []
+    for query in queries[:3]:
+        if not query:
+            continue
+        calls.extend(
+            [
+                ToolCallDraft(
+                    tool_name="research.arxiv.search",
+                    arguments={"query": query, "max_results": 3},
+                ),
+                ToolCallDraft(
+                    tool_name="browser.mcp.search",
+                    arguments={"query": query, "search_depth": "basic", "max_results": 5},
+                ),
+            ]
+        )
+    return calls
+
+
+def _needs_web_travel_research(notes: str) -> bool:
+    lowered = notes.lower()
+    return any(
+        token in lowered
+        for token in (
+            "攻略",
+            "推荐",
+            "景点",
+            "guide",
+            "recommend",
+            "attraction",
+            "policy",
+            "官网",
+        )
+    )
 
 
 def _planning_calls(context: dict[str, Any]) -> list[ToolCallDraft]:

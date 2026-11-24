@@ -81,6 +81,18 @@ class Settings(BaseSettings):
     deepdoc_model_home: Path | None = None
     deepdoc_timeout_seconds: int = 180
 
+    tavily_mcp_enabled: bool = False
+    tavily_mcp_endpoint: str = "https://mcp.tavily.com/mcp/"
+    tavily_api_key: str = ""
+    tavily_mcp_tool_cache_ttl_seconds: int = Field(default=300, ge=1)
+    tavily_mcp_search_timeout_seconds: float = Field(default=30.0, gt=0)
+    tavily_mcp_extract_timeout_seconds: float = Field(default=60.0, gt=0)
+    tavily_mcp_map_timeout_seconds: float = Field(default=60.0, gt=0)
+    tavily_mcp_crawl_timeout_seconds: float = Field(default=180.0, gt=0)
+    tavily_mcp_max_sse_event_size: int = Field(default=1_048_576, ge=1024)
+    tavily_mcp_max_page_chars: int = Field(default=50_000, ge=1000)
+    tavily_mcp_max_total_chars: int = Field(default=200_000, ge=1000)
+
     qq_smtp_host: str = "smtp.qq.com"
     qq_smtp_port: int = 465
     qq_smtp_username: str = ""

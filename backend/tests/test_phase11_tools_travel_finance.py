@@ -1,5 +1,4 @@
 from datetime import UTC, date, datetime
-import sys
 
 import pytest
 
@@ -17,7 +16,7 @@ from app.schemas.tools import WeatherForecast, WeatherLookupRequest, WeatherLook
 from app.schemas.travel import RouteSuggestion, TravelItineraryRequest, TravelMemoryCandidate, TravelPlaceSuggestion
 from app.tools.executor import ToolExecutor
 from app.tools.logging import ToolExecutionLogger
-from app.tools.mcp_adapters import BrowserMcpSearchExtractTool, GoogleMapsDirectionsTool, GoogleMapsPlacesTool
+from app.tools.google_maps import GoogleMapsDirectionsTool, GoogleMapsPlacesTool
 from app.tools.models import ToolCallRequest, ToolSpec
 from app.tools.registry import ToolRegistry, build_default_tool_registry
 from app.tools.weather import WeatherLookupTool, _parse_daily_forecasts
@@ -36,6 +35,10 @@ def test_default_tool_registry_exposes_weather_lookup() -> None:
         "research.web.search",
         "reminder.draft",
         "calendar.event.draft",
+        "browser.mcp.search",
+        "browser.mcp.extract",
+        "browser.mcp.map",
+        "browser.mcp.crawl",
         "browser.mcp.search_extract",
         "travel.maps.directions",
         "travel.maps.places",
@@ -51,7 +54,8 @@ def test_default_tool_registry_exposes_weather_lookup() -> None:
 
 def test_default_tool_registry_reports_provider_availability(monkeypatch) -> None:
     monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
-    monkeypatch.delenv("BROWSER_MCP_ENABLED", raising=False)
+    monkeypatch.delenv("TAVILY_MCP_ENABLED", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
     registry = build_default_tool_registry()
     statuses = {status.name: status for status in registry.list_availability()}
@@ -60,143 +64,6 @@ def test_default_tool_registry_reports_provider_availability(monkeypatch) -> Non
     assert statuses["travel.maps.directions"].missing_env == ["GOOGLE_MAPS_API_KEY"]
     assert statuses["travel.maps.places"].available is False
     assert statuses["browser.mcp.search_extract"].available is False
-
-
-def test_browser_mcp_status_available_when_http_endpoint_configured(monkeypatch) -> None:
-    monkeypatch.setenv("BROWSER_MCP_ENABLED", "true")
-    monkeypatch.setenv("BROWSER_MCP_ENDPOINT", "http://127.0.0.1:8765/mcp")
-
-    status = BrowserMcpSearchExtractTool().availability()
-
-    assert status.available is True
-    assert status.status == "available"
-    assert status.metadata["transport"] == "http_jsonrpc"
-
-
-@pytest.mark.asyncio
-async def test_browser_mcp_http_runtime_calls_tools_call_and_normalizes_results(monkeypatch) -> None:
-    monkeypatch.setenv("BROWSER_MCP_ENABLED", "true")
-    monkeypatch.setenv("BROWSER_MCP_ENDPOINT", "http://127.0.0.1:8765/mcp")
-    monkeypatch.setenv("BROWSER_MCP_TOOL", "browser.search_extract")
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "jsonrpc": "2.0",
-                "id": "browser-search-extract-1",
-                "result": {
-                    "structuredContent": {
-                        "results": [
-                            {
-                                "title": "University visa guidance",
-                                "url": "https://example.edu/visa",
-                                "snippet": "Bring passport and proof of address.",
-                            }
-                        ]
-                    }
-                },
-            }
-
-    class FakeAsyncClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return False
-
-        async def post(self, url, json, headers):
-            captured["url"] = url
-            captured["json"] = json
-            captured["headers"] = headers
-            return FakeResponse()
-
-    monkeypatch.setattr("app.tools.browser_mcp.httpx.AsyncClient", FakeAsyncClient)
-
-    output = await BrowserMcpSearchExtractTool().run(
-        {
-            "task": "Search university visa guidance",
-            "url": "https://example.edu/visa",
-            "extraction_goal": "Required documents",
-        }
-    )
-
-    assert output["provider_status"]["available"] is True
-    assert output["results"][0]["title"] == "University visa guidance"
-    assert output["results"][0]["text"] == "Bring passport and proof of address."
-    assert captured["json"]["method"] == "tools/call"
-    assert captured["json"]["params"]["name"] == "browser.search_extract"
-    assert captured["json"]["params"]["arguments"]["url"] == "https://example.edu/visa"
-
-
-@pytest.mark.asyncio
-async def test_browser_mcp_http_runtime_reports_jsonrpc_error(monkeypatch) -> None:
-    monkeypatch.setenv("BROWSER_MCP_ENABLED", "true")
-    monkeypatch.setenv("BROWSER_MCP_ENDPOINT", "http://127.0.0.1:8765/mcp")
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"jsonrpc": "2.0", "id": "browser-search-extract-1", "error": {"code": -32000, "message": "browser closed"}}
-
-    class FakeAsyncClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return False
-
-        async def post(self, url, json, headers):
-            return FakeResponse()
-
-    monkeypatch.setattr("app.tools.browser_mcp.httpx.AsyncClient", FakeAsyncClient)
-
-    output = await BrowserMcpSearchExtractTool().run({"task": "Extract visible page text"})
-
-    assert output["provider_status"]["available"] is False
-    assert output["provider_status"]["status"] == "degraded"
-    assert "browser closed" in output["recoverable_error"]
-
-
-@pytest.mark.asyncio
-async def test_browser_mcp_stdio_runtime_calls_tools_call(monkeypatch, tmp_path) -> None:
-    server = tmp_path / "fake_browser_mcp.py"
-    server.write_text(
-        "\n".join(
-            [
-                "import json, sys",
-                "for line in sys.stdin:",
-                "    msg = json.loads(line)",
-                "    if msg.get('method') == 'initialize':",
-                "        print(json.dumps({'jsonrpc': '2.0', 'id': msg['id'], 'result': {'capabilities': {}}}), flush=True)",
-                "    elif msg.get('method') == 'tools/call':",
-                "        result = {'content': [{'type': 'text', 'text': 'Visible page text from Browser MCP'}]}",
-                "        print(json.dumps({'jsonrpc': '2.0', 'id': msg['id'], 'result': result}), flush=True)",
-                "        break",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("BROWSER_MCP_ENABLED", "true")
-    monkeypatch.delenv("BROWSER_MCP_ENDPOINT", raising=False)
-    monkeypatch.setenv("BROWSER_MCP_COMMAND", f"{sys.executable} {server}")
-
-    output = await BrowserMcpSearchExtractTool().run({"task": "Extract current page"})
-
-    assert output["provider_status"]["available"] is True
-    assert output["transport"] == "stdio_jsonrpc"
-    assert output["results"][0]["text"] == "Visible page text from Browser MCP"
 
 
 @pytest.mark.asyncio
@@ -348,7 +215,7 @@ def test_google_maps_tools_call_live_endpoints_and_parse_results(monkeypatch) ->
                 }
             )
 
-    monkeypatch.setattr("app.tools.mcp_adapters.httpx.Client", FakeClient)
+    monkeypatch.setattr("app.tools.google_maps.httpx.Client", FakeClient)
 
     route_payload = GoogleMapsDirectionsTool().lookup_sync("London", "Manchester", mode="driving")
     place_payload = GoogleMapsPlacesTool().search_sync("Manchester", "student friendly restaurant", category="restaurant")

@@ -158,7 +158,15 @@ class TravelWorker:
         input_key="travel",
         input_schema="TravelPlanRequest",
         output_artifact_kind="travel_plan",
-        allowed_tools=["weather.lookup", "travel.maps.directions", "travel.maps.places"],
+        allowed_tools=[
+            "weather.lookup",
+            "travel.maps.directions",
+            "travel.maps.places",
+            "browser.mcp.search",
+            "browser.mcp.extract",
+            "browser.mcp.map",
+            "browser.mcp.crawl",
+        ],
         memory_namespaces=["travel"],
         missing_information_contract=["travel.origin", "travel.destination"],
     )
@@ -627,7 +635,14 @@ class AssignmentWorker:
         input_key="assignment",
         input_schema="AssignmentAnalysisRequest",
         output_artifact_kind="assignment_analysis",
-        allowed_tools=["research.arxiv.search", "research.web.search", "browser.mcp.search_extract"],
+        allowed_tools=[
+            "research.arxiv.search",
+            "research.web.search",
+            "browser.mcp.search",
+            "browser.mcp.extract",
+            "browser.mcp.map",
+            "browser.mcp.crawl",
+        ],
         memory_namespaces=["assignment"],
         missing_information_contract=["assignment.source_path", "assignment.file_id"],
     )
@@ -909,7 +924,7 @@ def _research_artifact_from_tool_batch(
         if result.tool_name in {"research.arxiv.search", "research.web.search"}:
             sources.extend(item for item in result.output.get("sources", []) if isinstance(item, dict))
             assumptions.extend(str(item) for item in result.output.get("assumptions", []))
-        elif result.tool_name == "browser.mcp.search_extract":
+        elif result.tool_name in {"browser.mcp.search", "browser.mcp.extract"}:
             sources.extend(
                 {
                     "source_type": "web",
@@ -920,6 +935,30 @@ def _research_artifact_from_tool_batch(
                 }
                 for item in result.output.get("results", [])
                 if isinstance(item, dict) and item.get("url")
+            )
+        elif result.tool_name == "browser.mcp.crawl":
+            sources.extend(
+                {
+                    "source_type": "web",
+                    "title": item.get("title") or "Crawled page",
+                    "url": item.get("url") or "",
+                    "summary": item.get("text"),
+                    "metadata": item.get("metadata") or {},
+                }
+                for item in result.output.get("pages", [])
+                if isinstance(item, dict) and item.get("url")
+            )
+        elif result.tool_name == "browser.mcp.map":
+            sources.extend(
+                {
+                    "source_type": "web",
+                    "title": "Mapped website page",
+                    "url": url,
+                    "summary": "Discovered through Tavily website mapping.",
+                    "metadata": {"base_url": result.output.get("base_url")},
+                }
+                for url in result.output.get("urls", [])
+                if isinstance(url, str) and url
             )
     deduped: dict[str, dict[str, Any]] = {}
     for source in sources:

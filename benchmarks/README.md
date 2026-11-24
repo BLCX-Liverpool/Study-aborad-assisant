@@ -1,6 +1,6 @@
 # 留学生活助手 Benchmark v1.0
 
-冻结日期：2026-11-23
+冻结日期：2026-11-24
 
 数据由 `backend/tests/benchmark_dataset_generator.py` 确定性生成。修改样本定义后，在仓库根目录运行 `./.venv/bin/python backend/tests/benchmark_dataset_generator.py` 重新生成；不要只手工修改生成后的表格。
 

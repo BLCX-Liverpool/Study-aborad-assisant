@@ -18,7 +18,6 @@ from app.tools.registry import ToolRegistry
 
 
 CancellationCheck = Callable[[], Awaitable[None]]
-_CACHE_TTL = timedelta(seconds=60)
 _RESULT_CACHE: dict[str, tuple[datetime, ToolCallResult]] = {}
 _CACHE_LOCK = asyncio.Lock()
 
@@ -163,8 +162,12 @@ class AgentToolRuntime:
     async def _execute_one(self, call: ToolCallDraft) -> ToolCallResult:
         tool = self.registry.get(call.tool_name)
         cache_key = _call_key(call.tool_name, call.arguments)
-        if tool is not None and tool.spec.permission_level in {PermissionLevel.READ, PermissionLevel.SEARCH}:
-            cached = await _cache_get(cache_key)
+        if (
+            tool is not None
+            and tool.spec.cache_ttl_seconds > 0
+            and tool.spec.permission_level in {PermissionLevel.READ, PermissionLevel.SEARCH}
+        ):
+            cached = await _cache_get(cache_key, ttl_seconds=tool.spec.cache_ttl_seconds)
             if cached is not None:
                 return cached.model_copy(update={"call_id": call.call_id, "cached": True})
         request = ToolCallRequest(
@@ -187,6 +190,7 @@ class AgentToolRuntime:
             tool is not None
             and result.success
             and not result.degraded
+            and tool.spec.cache_ttl_seconds > 0
             and tool.spec.permission_level in {PermissionLevel.READ, PermissionLevel.SEARCH}
         ):
             await _cache_put(cache_key, result)
@@ -230,13 +234,13 @@ def _idempotency_key(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-async def _cache_get(key: str) -> ToolCallResult | None:
+async def _cache_get(key: str, *, ttl_seconds: int = 60) -> ToolCallResult | None:
     async with _CACHE_LOCK:
         cached = _RESULT_CACHE.get(key)
         if cached is None:
             return None
         created_at, result = cached
-        if datetime.now(UTC) - created_at > _CACHE_TTL:
+        if datetime.now(UTC) - created_at > timedelta(seconds=ttl_seconds):
             _RESULT_CACHE.pop(key, None)
             return None
         return result

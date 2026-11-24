@@ -85,7 +85,13 @@ class ToolExecutor:
                 recoverable_error = _recoverable_output_error(output)
                 output_retryable = _recoverable_output_retryable(output)
                 if recoverable_error and output_retryable and tool.spec.external_api and attempt < attempts:
-                    await self.sleep(_retry_delay(attempt, self.jitter()))
+                    await self.sleep(
+                        _retry_delay(
+                            attempt,
+                            self.jitter(),
+                            retry_after_seconds=_recoverable_output_retry_after(output),
+                        )
+                    )
                     continue
                 result = ToolCallResult(
                     call_id=request.call_id,
@@ -203,7 +209,15 @@ def _is_retryable_exception(error: Exception) -> bool:
     return False
 
 
-def _retry_delay(attempt: int, jitter: float, error: Exception | None = None) -> float:
+def _retry_delay(
+    attempt: int,
+    jitter: float,
+    error: Exception | None = None,
+    *,
+    retry_after_seconds: float | None = None,
+) -> float:
+    if retry_after_seconds is not None:
+        return max(retry_after_seconds, 0.0)
     if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429:
         retry_after = error.response.headers.get("Retry-After")
         if retry_after:
@@ -213,3 +227,13 @@ def _retry_delay(attempt: int, jitter: float, error: Exception | None = None) ->
                 pass
     base = min(0.5 * (2 ** (attempt - 1)), 2.0)
     return base + max(0.0, min(jitter, 1.0)) * base * 0.3
+
+
+def _recoverable_output_retry_after(output: dict) -> float | None:
+    value = output.get("retry_after_seconds")
+    if value is None:
+        return None
+    try:
+        return max(float(value), 0.0)
+    except (TypeError, ValueError):
+        return None

@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = ROOT / "benchmarks"
-GENERATED_ON = "2026-11-23"
+GENERATED_ON = "2026-11-24"
 
 
 def _json(value: Any) -> str:
@@ -585,12 +585,24 @@ def _tool_positive(tool_name: str, i: int) -> tuple[str, dict[str, Any]]:
         scopes = ["UK", "England", "Scotland", "London", "Manchester", "official guidance", "university policy", "student services", "2026 update"]
         query = f"{scopes[(i // 5) % len(scopes)]} {topics[i % 5]}"
         return f"在网页中搜索 {query}。", {"query": query, "max_results": 5}
-    if tool_name == "browser.mcp.search_extract":
+    if tool_name == "browser.mcp.search":
+        topics = ["伦敦学生景点推荐", "英国学生签证政策", "曼彻斯特留学攻略", "大学延期政策", "学生住宿避坑"]
+        query = topics[i % len(topics)]
+        return f"使用 Tavily 搜索：{query}。", {"query": query, "search_depth": "basic", "topic": "general", "max_results": 5}
+    if tool_name == "browser.mcp.extract":
         tasks = ["提取学校延期政策", "提取住宿维修流程", "提取课程截止时间", "比较签证要求", "提取网页中的费用表"]
         domains = ["university.example", "housing.example", "course.example", "visa.example", "fees.example", "support.example", "travel.example", "library.example", "student.example"]
         task = tasks[i % 5]
         url = f"https://{domains[(i // 5) % len(domains)]}/benchmark/{i + 1}"
-        return f"使用浏览器打开 {url} 并{task}。", {"task": task, "url": url, "extraction_goal": task, "max_results": 3, "include_screenshot": False}
+        return f"使用 Tavily 打开 {url} 并{task}。", {"urls": [url], "extraction_goal": task, "extract_depth": "basic", "format": "markdown", "include_images": False}
+    if tool_name == "browser.mcp.map":
+        domain = ["university.example", "housing.example", "travel.example"][i % 3]
+        url = f"https://{domain}"
+        return f"探索网站 {url} 的相关页面结构。", {"url": url, "max_depth": 1, "max_breadth": 10, "limit": 30, "allow_external": False}
+    if tool_name == "browser.mcp.crawl":
+        domain = ["university.example", "housing.example", "travel.example"][i % 3]
+        url = f"https://{domain}"
+        return f"抓取网站 {url} 中与学生政策有关的页面。", {"url": url, "max_depth": 1, "max_breadth": 10, "limit": 20, "instructions": "仅返回与学生政策有关的页面", "allow_external": False, "extract_depth": "basic", "format": "markdown"}
     raise KeyError(tool_name)
 
 
@@ -604,7 +616,10 @@ def build_tool_cases() -> list[dict[str, Any]]:
         "calendar.event.draft",
         "research.arxiv.search",
         "research.web.search",
-        "browser.mcp.search_extract",
+        "browser.mcp.search",
+        "browser.mcp.extract",
+        "browser.mcp.map",
+        "browser.mcp.crawl",
     ]
     cases: list[dict[str, Any]] = []
 
@@ -630,8 +645,10 @@ def build_tool_cases() -> list[dict[str, Any]]:
             }
         )
 
+    positive_counts = {tool: 33 if index < 3 else 32 for index, tool in enumerate(tools)}
+    assert sum(positive_counts.values()) == 387
     for tool in tools:
-        for i in range(43):
+        for i in range(positive_counts[tool]):
             message, arguments = _tool_positive(tool, i)
             add(
                 "positive_single_tool",
@@ -670,11 +687,14 @@ def build_tool_cases() -> list[dict[str, Any]]:
         ("calendar.event.draft", {"title": "会议"}, "缺少start_time"),
         ("research.arxiv.search", {"max_results": 5}, "缺少query"),
         ("research.web.search", {"query": "visa", "max_results": 50}, "max_results越界"),
-        ("browser.mcp.search_extract", {"url": "https://example.com"}, "缺少task"),
+        ("browser.mcp.search", {"max_results": 5}, "缺少query"),
+        ("browser.mcp.extract", {"urls": []}, "urls不能为空"),
+        ("browser.mcp.map", {"url": "http://127.0.0.1/private"}, "禁止私网URL"),
+        ("browser.mcp.crawl", {"url": "https://example.com", "max_depth": 5}, "max_depth越界"),
         ("weather.lookup", {"location": "London", "days": 30}, "days越界"),
     ]
     for i in range(20):
-        tool, arguments, reason = invalid[i % 10]
+        tool, arguments, reason = invalid[i % len(invalid)]
         add(
             "invalid_arguments",
             f"使用 {tool} 执行非法参数测试：{reason}，变体{i // 10 + 1}。",
@@ -685,9 +705,17 @@ def build_tool_cases() -> list[dict[str, Any]]:
             ["不得执行Provider调用", "返回结构化参数错误", "不得自动虚构缺失参数"],
         )
 
-    unavailable_tools = ["travel.maps.directions", "travel.maps.places", "browser.mcp.search_extract", "weather.lookup"]
+    unavailable_tools = [
+        "travel.maps.directions",
+        "travel.maps.places",
+        "browser.mcp.search",
+        "browser.mcp.extract",
+        "browser.mcp.map",
+        "browser.mcp.crawl",
+        "weather.lookup",
+    ]
     for i in range(20):
-        tool = unavailable_tools[i % 4]
+        tool = unavailable_tools[i % len(unavailable_tools)]
         message, arguments = _tool_positive(tool, i)
         add(
             "provider_unavailable",
@@ -704,10 +732,11 @@ def build_tool_cases() -> list[dict[str, Any]]:
         ["research.arxiv.search", "research.web.search"],
         ["reminder.draft", "calendar.event.draft"],
         ["travel.maps.directions", "finance.exchange_rate"],
-        ["research.web.search", "browser.mcp.search_extract"],
+        ["browser.mcp.search", "browser.mcp.extract"],
+        ["browser.mcp.map", "browser.mcp.crawl"],
     ]
     for i in range(20):
-        selected = combinations[i % 5]
+        selected = combinations[i % len(combinations)]
         expected_args: dict[str, Any] = {}
         prompts = []
         for tool in selected:
@@ -755,7 +784,7 @@ def render_task_success(cases: list[dict[str, Any]]) -> str:
     return f"""# 任务完成率正式评估集（500条）
 
 版本：v1.0  
-生成日期：{GENERATED_ON}  
+生成日期：{GENERATED_ON}
 样本数：{len(cases)}
 
 ## 计算方式
@@ -784,7 +813,7 @@ def render_intents(cases: list[dict[str, Any]]) -> str:
     return f"""# 意图识别正式评估集（500条）
 
 版本：v1.0  
-生成日期：{GENERATED_ON}  
+生成日期：{GENERATED_ON}
 样本数：{len(cases)}
 
 ## 评估口径
@@ -820,7 +849,7 @@ def render_tools(cases: list[dict[str, Any]]) -> str:
     return f"""# 工具调用正确率正式评估集（500条）
 
 版本：v1.0  
-生成日期：{GENERATED_ON}  
+生成日期：{GENERATED_ON}
 样本数：{len(cases)}
 
 ## 评估口径

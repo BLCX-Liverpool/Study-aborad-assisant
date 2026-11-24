@@ -34,6 +34,7 @@ class ToolSpec(BaseModel):
     external_api: bool = False
     timeout_seconds: float = Field(default=10.0, gt=0)
     max_attempts: int = Field(default=1, ge=1, le=3)
+    cache_ttl_seconds: int = Field(default=60, ge=0, le=86_400)
 
 
 class RegisteredTool(BaseModel):

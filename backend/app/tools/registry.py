@@ -1,10 +1,15 @@
 from app.core.permissions import requires_approval
 from app.tools.adapters import ArxivSearchTool, CalendarDraftTool, ReminderDraftTool, WebSearchTool
 from app.tools.finance import FinanceExchangeRateTool
-from app.tools.mcp_adapters import BrowserMcpSearchExtractTool, GoogleMapsDirectionsTool, GoogleMapsPlacesTool
+from app.tools.google_maps import GoogleMapsDirectionsTool, GoogleMapsPlacesTool
+from app.tools.mcp import build_tavily_mcp_tools
 from app.schemas.research import ArxivSearchRequest, WebSearchRequest
 from app.schemas.tools import WeatherLookupRequest
 from app.tools.inputs import (
+    BrowserMcpCrawlInput,
+    BrowserMcpExtractInput,
+    BrowserMcpMapInput,
+    BrowserMcpSearchInput,
     BrowserSearchExtractInput,
     CalendarDraftInput,
     FinanceExchangeRateInput,
@@ -63,6 +68,14 @@ class ToolRegistry:
 
 def build_default_tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
+    tavily_tools = build_tavily_mcp_tools()
+    tavily_input_models = {
+        "browser.mcp.search": BrowserMcpSearchInput,
+        "browser.mcp.extract": BrowserMcpExtractInput,
+        "browser.mcp.map": BrowserMcpMapInput,
+        "browser.mcp.crawl": BrowserMcpCrawlInput,
+        "browser.mcp.search_extract": BrowserSearchExtractInput,
+    }
     tools = (
         (WeatherLookupTool(), WeatherLookupRequest),
         (ArxivSearchTool(), ArxivSearchRequest),
@@ -70,9 +83,9 @@ def build_default_tool_registry() -> ToolRegistry:
         (ReminderDraftTool(), ReminderDraftInput),
         (CalendarDraftTool(), CalendarDraftInput),
         (FinanceExchangeRateTool(), FinanceExchangeRateInput),
-        (BrowserMcpSearchExtractTool(), BrowserSearchExtractInput),
         (GoogleMapsDirectionsTool(), MapsDirectionsInput),
         (GoogleMapsPlacesTool(), MapsPlacesInput),
+        *((tool, tavily_input_models[tool.spec.name]) for tool in tavily_tools),
     )
     for tool, input_model in tools:
         registry.register(

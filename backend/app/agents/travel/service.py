@@ -44,7 +44,13 @@ class TravelAgentService:
         if tool_results is not None:
             weather = _weather_from_tool_results(tool_results)
             provider_result = provider_result_from_tool_results(request, tool_results)
-            return self._build_plan(request, weather=weather, provider_result=provider_result)
+            return self._build_plan(
+                request,
+                weather=weather,
+                provider_result=provider_result,
+                browser_sources=_browser_sources_from_tool_results(tool_results),
+                browser_statuses=_browser_statuses_from_tool_results(tool_results),
+            )
         weather_task = None
         if request.depart_at is not None:
             days = 1
@@ -69,6 +75,8 @@ class TravelAgentService:
         request: TravelPlanRequest,
         weather: WeatherLookupResponse | None,
         provider_result: TravelProviderResult,
+        browser_sources: list[TravelInformationSource] | None = None,
+        browser_statuses: list[ToolAvailabilityStatus] | None = None,
     ) -> TravelPlanOutput:
         tasks = self.checklist_builder.build_tasks(request)
         itinerary = self.checklist_builder.build_itinerary(request)
@@ -77,6 +85,7 @@ class TravelAgentService:
         tool_statuses = provider_result.tool_statuses or self.route_provider.statuses()
         if weather is not None:
             tool_statuses.append(_weather_status(weather))
+        tool_statuses.extend(browser_statuses or [])
 
         return TravelPlanOutput(
             summary=_summary(request, route_suggestions, place_suggestions, weather),
@@ -86,7 +95,10 @@ class TravelAgentService:
             place_suggestions=place_suggestions,
             weather_forecasts=weather.forecasts if weather is not None else [],
             budget_breakdown=_budget_breakdown(request),
-            information_sources=_information_sources(request, route_suggestions, place_suggestions, weather),
+            information_sources=[
+                *_information_sources(request, route_suggestions, place_suggestions, weather),
+                *(browser_sources or []),
+            ],
             tool_statuses=tool_statuses,
             memory_candidates=build_travel_memory_candidates(request),
             required_documents=_required_documents(request),
@@ -103,6 +115,48 @@ def _weather_from_tool_results(results: list[ToolCallResult]) -> WeatherLookupRe
         if result.success and result.tool_name == "weather.lookup":
             return WeatherLookupResponse.model_validate(result.output)
     return None
+
+
+def _browser_sources_from_tool_results(results: list[ToolCallResult]) -> list[TravelInformationSource]:
+    sources: list[TravelInformationSource] = []
+    for result in results:
+        if not result.success or result.tool_name not in {
+            "browser.mcp.search",
+            "browser.mcp.extract",
+            "browser.mcp.map",
+            "browser.mcp.crawl",
+        }:
+            continue
+        items = result.output.get("results") or result.output.get("pages") or []
+        if result.tool_name == "browser.mcp.map":
+            items = [{"url": url, "title": "Mapped website page"} for url in result.output.get("urls", [])]
+        for item in items:
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            description = str(item.get("text") or "Web source discovered through Tavily MCP.")
+            sources.append(
+                TravelInformationSource(
+                    name=str(item.get("title") or item["url"])[:200],
+                    source_type="provider_verified",
+                    description=f"{item['url']}: {description[:500]}",
+                    confidence=0.75,
+                    tool_name=result.tool_name,
+                )
+            )
+            if len(sources) >= 10:
+                return sources
+    return sources
+
+
+def _browser_statuses_from_tool_results(results: list[ToolCallResult]) -> list[ToolAvailabilityStatus]:
+    statuses: dict[str, ToolAvailabilityStatus] = {}
+    for result in results:
+        if not result.tool_name.startswith("browser.mcp."):
+            continue
+        payload = result.output.get("provider_status")
+        if isinstance(payload, dict):
+            statuses[result.tool_name] = ToolAvailabilityStatus.model_validate(payload)
+    return list(statuses.values())
 
 
 def _summary(request: TravelPlanRequest, route_suggestions, place_suggestions, weather: WeatherLookupResponse | None) -> str:

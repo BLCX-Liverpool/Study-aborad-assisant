@@ -24,7 +24,7 @@ Phase 2 adds Assignment Agent foundations:
 - Evidence helper
 - Assignment verifier
 
-Current scope still does not implement OCR execution, email drafting, MCP tools, or non-MVP agents.
+The current implementation includes opt-in Tavily Remote MCP tools for web Search, Extract, Map, and Crawl. Other external capabilities remain ordinary Tools with their own provider boundaries.
 
 Phase 3 adds Task Planner foundations:
 
