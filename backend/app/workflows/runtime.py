@@ -54,7 +54,7 @@ class WorkflowEventRuntime:
         async with get_session_factory()() as session:
             memory_manager = MemoryManager(
                 short_term_store=RedisShortTermMemoryStore(get_redis()),
-                conversation_repository=None,
+                conversation_repository=ConversationRepository(session),
                 long_term_repository=LongTermMemoryRepository(session),
             )
             await WorkflowEventHandler(

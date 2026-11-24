@@ -3,7 +3,11 @@ from datetime import timedelta
 
 from app.agents.travel.checklist import TravelChecklistBuilder
 from app.agents.travel.memory import build_travel_memory_candidates
-from app.agents.travel.route_provider import TravelProviderResult, TravelRouteProvider
+from app.agents.travel.route_provider import (
+    TravelProviderResult,
+    TravelRouteProvider,
+    provider_result_from_tool_results,
+)
 from app.schemas.tools import WeatherLookupRequest, WeatherLookupResponse
 from app.schemas.travel import (
     TravelBudgetItem,
@@ -12,6 +16,7 @@ from app.schemas.travel import (
     TravelPlanRequest,
 )
 from app.tools.models import ToolAvailabilityStatus
+from app.tools.models import ToolCallResult
 from app.tools.weather import WeatherLookupTool
 
 
@@ -30,7 +35,16 @@ class TravelAgentService:
         provider_result = self.route_provider.collect(request)
         return self._build_plan(request, weather=None, provider_result=provider_result)
 
-    async def plan_async(self, request: TravelPlanRequest) -> TravelPlanOutput:
+    async def plan_async(
+        self,
+        request: TravelPlanRequest,
+        *,
+        tool_results: list[ToolCallResult] | None = None,
+    ) -> TravelPlanOutput:
+        if tool_results is not None:
+            weather = _weather_from_tool_results(tool_results)
+            provider_result = provider_result_from_tool_results(request, tool_results)
+            return self._build_plan(request, weather=weather, provider_result=provider_result)
         weather_task = None
         if request.depart_at is not None:
             days = 1
@@ -50,7 +64,6 @@ class TravelAgentService:
         else:
             weather, provider_result = await asyncio.gather(weather_task, provider_task)
         return self._build_plan(request, weather=weather, provider_result=provider_result)
-
     def _build_plan(
         self,
         request: TravelPlanRequest,
@@ -83,6 +96,13 @@ class TravelAgentService:
             assumptions=_assumptions(request, weather, tool_statuses),
             requires_booking_approval=True,
         )
+
+
+def _weather_from_tool_results(results: list[ToolCallResult]) -> WeatherLookupResponse | None:
+    for result in results:
+        if result.success and result.tool_name == "weather.lookup":
+            return WeatherLookupResponse.model_validate(result.output)
+    return None
 
 
 def _summary(request: TravelPlanRequest, route_suggestions, place_suggestions, weather: WeatherLookupResponse | None) -> str:

@@ -43,6 +43,7 @@ class MemoryRoutingDecision(BaseModel):
 class TopicContinuityResult(BaseModel):
     relation: TopicRelation
     score: float = Field(ge=0.0, le=1.0)
+    semantic_similarity: float | None = Field(default=None, ge=0.0, le=1.0)
     active_entities: list[str] = Field(default_factory=list)
     topic_summary: str | None = None
     needs_llm_judgement: bool = False

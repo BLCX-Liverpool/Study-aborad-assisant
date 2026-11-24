@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from app.schemas.finance import ExchangeRateQuote
+from app.tools.models import ToolCallResult
 
 
 class ExchangeRateProvider(Protocol):
@@ -59,6 +60,41 @@ class StaticExchangeRateProvider:
             provider_name=self.provider_name,
             as_of=datetime.now(UTC),
             confidence=0.55,
+        )
+
+
+class ToolResultExchangeRateProvider:
+    """Serve only validated exchange-rate tool results to the finance analyzer."""
+
+    provider_name = "tool_result"
+
+    def __init__(self, results: list[ToolCallResult]) -> None:
+        self.quotes = {
+            (quote.base_currency.upper(), quote.quote_currency.upper()): quote
+            for result in results
+            if result.success and result.tool_name == "finance.exchange_rate"
+            for quote in [ExchangeRateQuote.model_validate(result.output)]
+        }
+
+    def quote(self, *, base_currency: str, quote_currency: str) -> ExchangeRateQuote:
+        key = (base_currency.upper(), quote_currency.upper())
+        if key[0] == key[1]:
+            return ExchangeRateQuote(
+                base_currency=key[0],
+                quote_currency=key[1],
+                rate=1.0,
+                source="user_provided",
+                provider_name=self.provider_name,
+                as_of=datetime.now(UTC),
+                confidence=1.0,
+            )
+        return self.quotes.get(key) or ExchangeRateQuote(
+            base_currency=key[0],
+            quote_currency=key[1],
+            source="unavailable",
+            provider_name=self.provider_name,
+            as_of=datetime.now(UTC),
+            recoverable_error=f"No validated tool result for {key[0]}->{key[1]}.",
         )
 
 

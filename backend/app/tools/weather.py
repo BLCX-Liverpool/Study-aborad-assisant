@@ -40,6 +40,9 @@ class WeatherLookupTool:
         permission_level=PermissionLevel.SEARCH,
         input_schema=WeatherLookupRequest.model_json_schema(),
         output_schema=WeatherLookupResponse.model_json_schema(),
+        external_api=True,
+        timeout_seconds=10.0,
+        max_attempts=3,
     )
 
     async def run(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -77,6 +80,7 @@ class WeatherLookupTool:
                 ],
                 source="fallback",
                 recoverable_error=f"{type(exc).__name__}: {exc}",
+                retryable=_is_transient_provider_error(exc),
             )
 
         resolved_location = _location_name(location)
@@ -95,6 +99,14 @@ def _first_location(payload: dict[str, Any], fallback_location: str) -> dict[str
     if not results:
         raise RuntimeError(f"No weather location found for {fallback_location!r}.")
     return results[0]
+
+
+def _is_transient_provider_error(error: Exception) -> bool:
+    if isinstance(error, (TimeoutError, ConnectionError, httpx.TimeoutException, httpx.TransportError)):
+        return True
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code in {408, 429} or error.response.status_code >= 500
+    return False
 
 
 def _location_name(location: dict[str, Any]) -> str:

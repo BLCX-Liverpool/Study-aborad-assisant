@@ -8,8 +8,9 @@ from app.tools.models import ToolCallRequest, ToolCallResult
 
 
 class ToolExecutionLogger:
-    def __init__(self, session: AsyncSession | None = None) -> None:
+    def __init__(self, session: AsyncSession | None = None, *, agent_run_id: str | None = None) -> None:
         self.session = session
+        self.agent_run_id = agent_run_id
 
     async def log(
         self,
@@ -28,21 +29,26 @@ class ToolExecutionLogger:
         if duration_ms is None:
             duration_ms = max((completed_at - started_at).total_seconds() * 1000, 0.0)
         trace_id = request.trace_id or str(uuid4())
-        agent_run = AgentRun(
-            id=str(uuid4()),
-            user_id=request.user_id or "anonymous",
-            conversation_id=request.conversation_id,
-            trace_id=trace_id,
-            agent_name="tool_executor",
-            input_json={"tool_name": request.tool_name, "arguments": request.arguments},
-            output_json=result.model_dump(mode="json"),
-            status=RunStatus.COMPLETED if result.success else RunStatus.FAILED,
-            started_at=started_at,
-            completed_at=completed_at,
-        )
-        self.session.add(agent_run)
+        agent_run = None
+        agent_run_id = self.agent_run_id
+        if agent_run_id is None:
+            agent_run = AgentRun(
+                id=str(uuid4()),
+                user_id=request.user_id or "anonymous",
+                conversation_id=request.conversation_id,
+                trace_id=trace_id,
+                agent_name="tool_executor",
+                input_json={"tool_name": request.tool_name, "arguments": request.arguments},
+                output_json=result.model_dump(mode="json"),
+                status=RunStatus.COMPLETED if result.success else RunStatus.FAILED,
+                started_at=started_at,
+                completed_at=completed_at,
+                idempotency_key=request.idempotency_key,
+            )
+            self.session.add(agent_run)
+            agent_run_id = agent_run.id
         tool_run = ToolRun(
-            agent_run_id=agent_run.id,
+            agent_run_id=agent_run_id,
             tool_name=request.tool_name,
             permission_level=str(result.permission_level or ""),
             input_json=request.arguments,
@@ -58,7 +64,7 @@ class ToolExecutionLogger:
                 trace_id=trace_id,
                 user_id=request.user_id,
                 conversation_id=request.conversation_id,
-                agent_run_id=agent_run.id,
+                agent_run_id=agent_run_id,
                 span_name=f"tool.{request.tool_name}",
                 span_type="tool",
                 status="completed" if result.success else "failed",
@@ -71,6 +77,11 @@ class ToolExecutionLogger:
                 metadata_json={
                     "permission_level": str(result.permission_level or ""),
                     "requires_approval": result.requires_approval,
+                    "call_id": request.call_id,
+                    "idempotency_key": request.idempotency_key,
+                    "attempts": result.attempts,
+                    "degraded": result.degraded,
+                    "cached": result.cached,
                 },
             )
         )

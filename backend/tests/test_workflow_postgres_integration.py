@@ -10,8 +10,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.db.models import (
     AgentArtifactRecord,
     AgentRun,
+    Conversation,
+    ConversationMessage,
     EmailSendAttempt,
     MessageInbox,
+    Memory,
     OutboxEvent,
     Reminder,
     ReminderStatus,
@@ -20,9 +23,14 @@ from app.db.models import (
     WorkflowRun,
     WorkflowStep,
 )
+from app.memory.manager import MemoryManager
+from app.memory.repository import ConversationRepository, LongTermMemoryRepository
+from app.memory.short_term import InMemoryShortTermMemoryStore
 from app.schemas.email import EmailSendRequest
 from app.api.routes.dead_letters import replay_dead_letter
+from app.schemas.chat import ChatRequest
 from app.schemas.messages import AgentStepEvent, AgentTaskCommand
+from app.schemas.router import RouterOutput
 from app.scheduler.stale_run_recovery import StaleRunRecovery
 from app.scheduler.reminder_scheduler import ReminderScheduler
 from app.workers.result_service import WorkerResultService
@@ -37,6 +45,148 @@ pytestmark = pytest.mark.skipif(
     os.getenv("RUN_WORKFLOW_INTEGRATION") != "1",
     reason="Set RUN_WORKFLOW_INTEGRATION=1 with the migrated PostgreSQL database running",
 )
+
+
+@pytest.mark.asyncio
+async def test_long_term_memory_pgvector_top_k_respects_user_and_namespace() -> None:
+    database_url = os.environ["DATABASE_URL"]
+    engine = create_async_engine(database_url, pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    token = uuid4().hex
+    user_id = f"memory-user-{token}"
+    other_user_id = f"other-memory-user-{token}"
+
+    try:
+        async with session_factory() as session:
+            session.add_all(
+                [
+                    Memory(
+                        id=f"target-{token}",
+                        user_id=user_id,
+                        namespace="travel",
+                        memory_type="user_preference",
+                        content="Prefers quiet hotels near public transport.",
+                        embedding=[1.0, *([0.0] * 1535)],
+                        access_policy_json={"confirmed": True, "rejected": False},
+                    ),
+                    Memory(
+                        id=f"other-namespace-{token}",
+                        user_id=user_id,
+                        namespace="finance",
+                        memory_type="user_preference",
+                        content="Finance-only memory.",
+                        embedding=[1.0, *([0.0] * 1535)],
+                        access_policy_json={"confirmed": True, "rejected": False},
+                    ),
+                    Memory(
+                        id=f"other-user-{token}",
+                        user_id=other_user_id,
+                        namespace="travel",
+                        memory_type="user_preference",
+                        content="Another user's travel memory.",
+                        embedding=[1.0, *([0.0] * 1535)],
+                        access_policy_json={"confirmed": True, "rejected": False},
+                    ),
+                ]
+            )
+            await session.commit()
+
+            results = await LongTermMemoryRepository(session).search(
+                user_id=user_id,
+                query="quiet hotel",
+                namespaces=["travel"],
+                top_k=5,
+                query_embedding=[1.0, *([0.0] * 1535)],
+            )
+
+            assert [item.id for item in results] == [f"target-{token}"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_async_workflow_completion_persists_conversation_messages_once() -> None:
+    database_url = os.environ["DATABASE_URL"]
+    engine = create_async_engine(database_url, pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    token = uuid4().hex
+    user_id = f"conversation-user-{token}"
+    conversation_id = f"conversation-{token}"
+
+    try:
+        async with session_factory() as session:
+            repository = WorkflowRepository(session)
+            request = ChatRequest(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                message="异步用户消息",
+            )
+            router_output = RouterOutput(primary_intent="general_chat", confidence=0.9)
+            workflow = await repository.create(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                trace_id=str(uuid4()),
+                request_id=f"conversation-request-{token}",
+                workflow_type="chat",
+                input_json={"chat_request": request.model_dump(mode="json")},
+            )
+            workflow.plan_json = {"router": router_output.model_dump(mode="json")}
+            await repository.transition_workflow(workflow, WorkflowStatus.PLANNING)
+            step = (
+                await repository.create_steps(
+                    workflow.id,
+                    [{"index": 0, "intent_name": "general_chat.respond", "agent_intent": "general_chat"}],
+                )
+            )[0]
+            await repository.transition_workflow(workflow, WorkflowStatus.RUNNING)
+            await repository.transition_step(step, StepStatus.QUEUED)
+            await repository.transition_step(step, StepStatus.RUNNING)
+            await repository.transition_step(
+                step,
+                StepStatus.COMPLETED,
+                result_summary="异步助手回复",
+            )
+            await session.commit()
+
+            event = AgentStepEvent(
+                message_id=f"conversation-event-{token}",
+                message_type="agent.step.completed",
+                workflow_id=workflow.id,
+                step_id=step.id,
+                agent="general_chat",
+                trace_id=workflow.trace_id,
+                result_summary="异步助手回复",
+            )
+            memory_manager = MemoryManager(
+                short_term_store=InMemoryShortTermMemoryStore(),
+                conversation_repository=ConversationRepository(session),
+                long_term_repository=LongTermMemoryRepository(session),
+            )
+            handler = WorkflowEventHandler(
+                session,
+                consumer_name=f"conversation-consumer-{token}",
+                memory_manager=memory_manager,
+            )
+
+            await handler.handle(event)
+            await handler.handle(event)
+
+            conversation = await session.get(Conversation, conversation_id)
+            messages = (
+                await session.execute(
+                    select(ConversationMessage)
+                    .where(ConversationMessage.conversation_id == conversation_id)
+                    .order_by(ConversationMessage.created_at)
+                )
+            ).scalars().all()
+            assert conversation is not None
+            assert conversation.user_id == user_id
+            assert [(message.role, message.content) for message in messages] == [
+                ("user", "异步用户消息"),
+                ("assistant", "异步助手回复"),
+            ]
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

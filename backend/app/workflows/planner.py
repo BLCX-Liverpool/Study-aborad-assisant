@@ -62,6 +62,11 @@ class DurableWorkflowPlanner:
                     agent_inputs=request.agent_inputs,
                     conversation_context=memory_context.prompt_context,
                 )
+                memory_context = await self.memory_manager.rebuild_context_after_reroute(
+                    request=request,
+                    router_output=router_output,
+                    memory_context=memory_context,
+                )
         plan = _execution_plan(request, router_output)
         workflow.plan_json = {
             "router": router_output.model_dump(mode="json"),

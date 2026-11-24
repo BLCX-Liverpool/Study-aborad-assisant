@@ -37,6 +37,9 @@ class GoogleMapsDirectionsTool:
         capability="travel_route_directions",
         provider_name="google_maps",
         required_env=["GOOGLE_MAPS_API_KEY"],
+        external_api=True,
+        timeout_seconds=12.0,
+        max_attempts=3,
         input_schema={
             "type": "object",
             "properties": {
@@ -122,6 +125,9 @@ class GoogleMapsPlacesTool:
         capability="travel_places_search",
         provider_name="google_maps",
         required_env=["GOOGLE_MAPS_API_KEY"],
+        external_api=True,
+        timeout_seconds=12.0,
+        max_attempts=3,
         input_schema={
             "type": "object",
             "properties": {
@@ -394,6 +400,7 @@ def _provider_error_response(status: ToolAvailabilityStatus, result_key: str, ex
         result_key,
         [],
         recoverable_error=f"{type(exc).__name__}: {exc}",
+        retryable=_is_transient_provider_error(exc),
     )
 
 
@@ -402,6 +409,7 @@ def _provider_status_response(
     result_key: str,
     results: list[dict[str, Any]],
     recoverable_error: str | None = None,
+    retryable: bool = False,
 ) -> dict[str, Any]:
     provider_status = status
     if recoverable_error:
@@ -417,8 +425,17 @@ def _provider_status_response(
         result_key: results,
         "source": "google_maps",
         "recoverable_error": recoverable_error,
+        "retryable": retryable,
         "assumptions": [
             "Google Maps provider data is advisory and must be rechecked before booking.",
             "No booking, payment, or external submission was performed.",
         ],
     }
+
+
+def _is_transient_provider_error(error: Exception) -> bool:
+    if isinstance(error, (TimeoutError, ConnectionError, httpx.TimeoutException, httpx.TransportError)):
+        return True
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code in {408, 429} or error.response.status_code >= 500
+    return False

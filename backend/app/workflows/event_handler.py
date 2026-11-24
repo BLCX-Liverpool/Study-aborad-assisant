@@ -104,6 +104,7 @@ class WorkflowEventHandler:
                     response_text=workflow.final_response or "",
                     router_output=router_output,
                     topic_summary=None,
+                    commit=False,
                 )
             artifacts = await self.repository.list_artifacts(workflow.id)
             event = WorkflowCompletedEvent(

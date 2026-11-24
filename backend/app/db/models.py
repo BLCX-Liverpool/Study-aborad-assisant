@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
 
 from app.db.base import Base
 
@@ -162,7 +163,7 @@ class Memory(Base, TimestampMixin):
     source_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     access_policy_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
 
 
 class Task(Base, TimestampMixin):

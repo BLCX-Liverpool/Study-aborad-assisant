@@ -10,7 +10,13 @@ from app.memory.short_term import InMemoryShortTermMemoryStore, ShortTermMemoryC
 from app.core.llm import get_stage_llm_client
 from app.rag.embeddings import EmbeddingService
 from app.schemas.chat import ChatRequest, ChatTurn
-from app.schemas.memory import LongTermMemoryItem, MemoryCandidateInput, MemoryContext
+from app.schemas.memory import (
+    LongTermMemoryItem,
+    MemoryCandidateInput,
+    MemoryContext,
+    MemoryRoutingDecision,
+    TopicContinuityResult,
+)
 from app.schemas.router import RouterOutput
 
 
@@ -49,7 +55,12 @@ class MemoryManager:
     ) -> MemoryContext:
         stored_recent = await self.short_term_store.load_recent(conversation_id, limit=10)
         recent_messages = stored_recent or request.history[-10:]
-        topic = self.continuity_detector.detect(request.message, recent_messages)
+        semantic_similarity = await self._topic_semantic_similarity(request.message, recent_messages)
+        topic = self.continuity_detector.detect(
+            request.message,
+            recent_messages,
+            semantic_similarity=semantic_similarity,
+        )
         topic = await self.ambiguity_judge.judge(
             query=request.message,
             recent_messages=recent_messages,
@@ -60,23 +71,13 @@ class MemoryManager:
             topic=topic,
             recent_messages=recent_messages,
         )
-        routing = await self.memory_router.route_async(
+        routing, long_term_memories = await self._route_and_recall(
+            request=request,
             query=rewrite.rewritten_query,
             router_output=router_output,
             recent_messages=recent_messages,
             topic=topic,
         )
-
-        long_term_memories: list[LongTermMemoryItem] = []
-        query_embedding = await self._embed_optional(rewrite.rewritten_query)
-        if routing.need_long_term_memory and self.long_term_repository is not None:
-            long_term_memories = await self.long_term_repository.search(
-                user_id=request.user_id,
-                query=rewrite.rewritten_query,
-                namespaces=list(routing.namespaces),
-                top_k=5,
-                query_embedding=query_embedding,
-            )
 
         return MemoryContext(
             routing=routing,
@@ -87,6 +88,79 @@ class MemoryManager:
             prompt_context=_build_prompt_context(recent_messages, long_term_memories),
         )
 
+    async def rebuild_context_after_reroute(
+        self,
+        *,
+        request: ChatRequest,
+        router_output: RouterOutput,
+        memory_context: MemoryContext,
+    ) -> MemoryContext:
+        """Re-select namespaces and recall memory after a rewritten query changes routing."""
+        query = memory_context.query_rewrite.rewritten_query
+        routing, long_term_memories = await self._route_and_recall(
+            request=request,
+            query=query,
+            router_output=router_output,
+            recent_messages=memory_context.recent_messages,
+            topic=memory_context.topic,
+        )
+        return memory_context.model_copy(
+            update={
+                "routing": routing,
+                "long_term_memories": long_term_memories,
+                "prompt_context": _build_prompt_context(
+                    memory_context.recent_messages,
+                    long_term_memories,
+                ),
+            }
+        )
+
+    async def _route_and_recall(
+        self,
+        *,
+        request: ChatRequest,
+        query: str,
+        router_output: RouterOutput,
+        recent_messages: list[ChatTurn],
+        topic: TopicContinuityResult,
+    ) -> tuple[MemoryRoutingDecision, list[LongTermMemoryItem]]:
+        routing = await self.memory_router.route_async(
+            query=query,
+            router_output=router_output,
+            recent_messages=recent_messages,
+            topic=topic,
+        )
+        long_term_memories: list[LongTermMemoryItem] = []
+        if routing.need_long_term_memory and self.long_term_repository is not None:
+            query_embedding = await self._embed_optional(query)
+            long_term_memories = await self.long_term_repository.search(
+                user_id=request.user_id,
+                query=query,
+                namespaces=list(routing.namespaces),
+                top_k=5,
+                query_embedding=query_embedding,
+            )
+        return routing, long_term_memories
+
+    async def _topic_semantic_similarity(
+        self,
+        query: str,
+        recent_messages: list[ChatTurn],
+    ) -> float | None:
+        if self.embedding_service is None or not recent_messages:
+            return None
+        recent_text = "\n".join(
+            f"{message.role}: {message.content}"
+            for message in recent_messages[-5:]
+        )
+        try:
+            embeddings = await self.embedding_service.embed_texts([query, recent_text])
+        except Exception:
+            return None
+        if len(embeddings) != 2:
+            return None
+        return _cosine_similarity(embeddings[0], embeddings[1])
+
     async def update_after_response(
         self,
         *,
@@ -95,6 +169,7 @@ class MemoryManager:
         response_text: str,
         router_output: RouterOutput,
         topic_summary: str | None = None,
+        commit: bool = True,
     ) -> None:
         user_turn = ChatTurn(role="user", content=request.message)
         assistant_turn = ChatTurn(role="assistant", content=response_text)
@@ -151,7 +226,7 @@ class MemoryManager:
             router_output=router_output,
         )
 
-        if self.conversation_repository is not None:
+        if self.conversation_repository is not None and commit:
             await self.conversation_repository.commit()
 
     async def _embed_optional(self, text: str) -> list[float] | None:
@@ -250,3 +325,14 @@ def _extract_memory_candidates(message: str) -> list[str]:
 def _has_explicit_memory_confirmation(message: str) -> bool:
     lowered = message.lower()
     return any(signal in lowered for signal in ("记住", "请记住", "remember this", "you can remember"))
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
+    left_norm = sum(value * value for value in left) ** 0.5
+    right_norm = sum(value * value for value in right) ** 0.5
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return max(0.0, min(dot / (left_norm * right_norm), 1.0))

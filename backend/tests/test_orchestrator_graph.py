@@ -108,6 +108,66 @@ async def test_orchestrator_graph_is_main_async_dispatch_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sync_worker_receives_rewritten_query() -> None:
+    rewritten_query = "继续制定伦敦三日旅行计划"
+
+    class RewritingMemoryManager:
+        async def build_context(self, request, conversation_id, router_output):
+            from app.schemas.memory import MemoryContext, MemoryRoutingDecision, QueryRewriteResult, TopicContinuityResult
+
+            return MemoryContext(
+                routing=MemoryRoutingDecision(reason="initial"),
+                topic=TopicContinuityResult(relation="CONTINUE", score=0.9),
+                query_rewrite=QueryRewriteResult(
+                    original_query=request.message,
+                    rewritten_query=rewritten_query,
+                    changed=True,
+                ),
+            )
+
+        async def rebuild_context_after_reroute(self, *, memory_context, **_kwargs):
+            return memory_context
+
+        async def update_after_response(self, **_kwargs):
+            return None
+
+    class CapturingWorker:
+        spec = WorkerAgentSpec(
+            intent="travel",
+            input_key="travel",
+            input_schema="TravelPlanRequest",
+            output_artifact_kind="travel_plan",
+        )
+
+        def __init__(self) -> None:
+            self.message = None
+
+        async def run(self, context: WorkerContext) -> WorkerRunResult:
+            self.message = context.request.message
+            return WorkerRunResult(final_response="rewritten query received")
+
+    worker = CapturingWorker()
+    graph = build_orchestrator_graph(
+        router=FakeRouter(),
+        memory_manager=RewritingMemoryManager(),  # type: ignore[arg-type]
+        worker_registry=WorkerRegistry([worker]),
+        state_store=ConversationStateStore(),
+    )
+
+    await graph.ainvoke(
+        {
+            "request": ChatRequest(
+                user_id="user-1",
+                conversation_id="conversation-1",
+                message="那个计划继续做",
+            )
+        }
+    )
+
+    assert worker.message == rewritten_query
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_state_is_scoped_by_conversation_id() -> None:
     class StatefulWorker:
         spec = WorkerAgentSpec(

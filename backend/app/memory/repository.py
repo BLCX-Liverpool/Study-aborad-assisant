@@ -1,4 +1,4 @@
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Conversation, ConversationMessage, Memory, MemoryAccessLog
@@ -9,6 +9,8 @@ from app.memory.token_counter import TokenCounter
 
 PENDING_MEMORY_TYPES = {"memory_candidate", "travel_preference_candidate"}
 REJECTED_MEMORY_TYPES = {"rejected_memory_candidate"}
+MEMORY_EMBEDDING_DIMENSIONS = 1536
+MIN_VECTOR_SIMILARITY = 0.08
 
 
 class ConversationRepository:
@@ -74,6 +76,68 @@ class LongTermMemoryRepository:
         if not namespaces:
             return []
 
+        if query_embedding and len(query_embedding) == MEMORY_EMBEDDING_DIMENSIONS:
+            return await self._vector_search(
+                user_id=user_id,
+                namespaces=namespaces,
+                top_k=top_k,
+                query_embedding=query_embedding,
+            )
+
+        return await self._lexical_search(
+            user_id=user_id,
+            query=query,
+            namespaces=namespaces,
+            top_k=top_k,
+        )
+
+    async def _vector_search(
+        self,
+        *,
+        user_id: str,
+        namespaces: list[str],
+        top_k: int,
+        query_embedding: list[float],
+    ) -> list[LongTermMemoryItem]:
+        distance = Memory.embedding.cosine_distance(query_embedding)
+        similarity = (1.0 - distance).label("score")
+        confirmed = func.coalesce(
+            Memory.access_policy_json["confirmed"].as_boolean(),
+            True,
+        )
+        rejected = func.coalesce(
+            Memory.access_policy_json["rejected"].as_boolean(),
+            False,
+        )
+        statement = (
+            select(Memory, similarity)
+            .where(
+                Memory.user_id == user_id,
+                Memory.namespace.in_(namespaces),
+                Memory.memory_type.not_in(PENDING_MEMORY_TYPES | REJECTED_MEMORY_TYPES),
+                Memory.embedding.is_not(None),
+                confirmed.is_(True),
+                rejected.is_(False),
+                similarity >= MIN_VECTOR_SIMILARITY,
+            )
+            .order_by(distance)
+            .limit(top_k)
+        )
+        result = await self.session.execute(statement)
+        return [
+            _to_memory_item(memory, score=max(0.0, min(float(score), 1.0)))
+            for memory, score in result.all()
+        ]
+
+    async def _lexical_search(
+        self,
+        *,
+        user_id: str,
+        query: str,
+        namespaces: list[str],
+        top_k: int,
+    ) -> list[LongTermMemoryItem]:
+
         statement = select(Memory).where(
             Memory.user_id == user_id,
             Memory.namespace.in_(namespaces),
@@ -90,10 +154,9 @@ class LongTermMemoryRepository:
         bm25_scores = _normalize_scores(bm25.score(query))
         scored = []
         for index, memory in enumerate(memories):
-            vector_score = _cosine_similarity(memory.embedding, query_embedding) if memory.embedding and query_embedding else 0.0
             lexical_score = bm25_scores[index] if index < len(bm25_scores) else 0.0
             substring_score = _substring_score(memory.content, query)
-            score = 0.45 * lexical_score + 0.45 * vector_score + 0.10 * substring_score
+            score = 0.90 * lexical_score + 0.10 * substring_score
             if score >= 0.08:
                 scored.append(_to_memory_item(memory, score=score))
         return sorted(scored, key=lambda item: item.score, reverse=True)[:top_k]
@@ -280,20 +343,6 @@ class LongTermMemoryRepository:
         return count
 
 
-def _score_memory(
-    content: str,
-    query: str,
-    memory_embedding: list[float] | None = None,
-    query_embedding: list[float] | None = None,
-) -> float:
-    content_terms = set(content.lower().split())
-    query_terms = set(query.lower().split())
-    lexical = len(content_terms & query_terms) / len(query_terms) if query_terms else 0.0
-    if memory_embedding and query_embedding:
-        return 0.55 * lexical + 0.45 * _cosine_similarity(memory_embedding, query_embedding)
-    return lexical
-
-
 def _normalize_scores(scores: list[float]) -> list[float]:
     if not scores:
         return []
@@ -310,17 +359,6 @@ def _substring_score(content: str, query: str) -> float:
         return 0.0
     matches = sum(1 for term in terms if term in content_lower)
     return matches / len(terms)
-
-
-def _cosine_similarity(left: list[float], right: list[float]) -> float:
-    if not left or not right or len(left) != len(right):
-        return 0.0
-    dot = sum(a * b for a, b in zip(left, right, strict=True))
-    left_norm = sum(a * a for a in left) ** 0.5
-    right_norm = sum(b * b for b in right) ** 0.5
-    if left_norm == 0 or right_norm == 0:
-        return 0.0
-    return dot / (left_norm * right_norm)
 
 
 def _is_unconfirmed_or_rejected(memory: Memory) -> bool:

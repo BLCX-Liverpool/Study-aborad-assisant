@@ -106,6 +106,8 @@ CREATE TABLE IF NOT EXISTS memories (
 
 CREATE INDEX IF NOT EXISTS idx_memories_user_id ON memories(user_id);
 CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
+CREATE INDEX IF NOT EXISTS idx_memories_user_namespace ON memories(user_id, namespace);
+CREATE INDEX IF NOT EXISTS idx_memories_embedding_hnsw ON memories USING hnsw (embedding vector_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS tasks (
     id VARCHAR(64) PRIMARY KEY,

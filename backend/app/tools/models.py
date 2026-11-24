@@ -31,29 +31,43 @@ class ToolSpec(BaseModel):
     input_schema: dict[str, Any] = Field(default_factory=dict)
     output_schema: dict[str, Any] = Field(default_factory=dict)
     requires_approval: bool = False
+    external_api: bool = False
+    timeout_seconds: float = Field(default=10.0, gt=0)
+    max_attempts: int = Field(default=1, ge=1, le=3)
 
 
 class RegisteredTool(BaseModel):
     spec: ToolSpec
     handler: ToolHandler
     availability_checker: ToolAvailabilityChecker | None = None
+    input_model: type[BaseModel] | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
 
 class ToolCallRequest(BaseModel):
+    call_id: str | None = None
     tool_name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     approved: bool = False
+    idempotency_key: str | None = None
     user_id: str | None = None
     conversation_id: str | None = None
     trace_id: str | None = None
 
 
 class ToolCallResult(BaseModel):
+    call_id: str | None = None
     tool_name: str
     success: bool
     output: dict[str, Any] = Field(default_factory=dict)
+    arguments: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     requires_approval: bool = False
     permission_level: PermissionLevel | None = None
+    attempts: int = 0
+    duration_ms: float | None = None
+    degraded: bool = False
+    cached: bool = False
+    retryable: bool = False
+    error_type: str | None = None

@@ -13,9 +13,9 @@ from app.schemas.chat import AgentArtifact, ChatRequest
 from app.schemas.execution import ExecutionStep
 from app.schemas.memory import MemoryContext
 from app.schemas.messages import AgentTaskCommand
-from app.tools.executor import ToolExecutor
-from app.tools.models import ToolCallRequest, ToolCallResult
+from app.tools.models import ToolCallResult
 from app.tools.registry import ToolRegistry, build_default_tool_registry
+from app.tools.runtime import AgentToolRuntime
 from app.workflows.repository import WorkflowRepository
 
 
@@ -38,6 +38,9 @@ class WorkerContextLoader:
         workflow = await self.repository.get(command.workflow_id)
         step = await self.repository.get_step(command.step_id, workflow_id=workflow.id)
         request = ChatRequest.model_validate(workflow.input_json["chat_request"])
+        memory_json = (workflow.plan_json or {}).get("memory_context")
+        memory_context = MemoryContext.model_validate(memory_json) if memory_json else None
+        request = _request_with_rewritten_query(request, memory_context)
         request = _request_for_step(request, worker.spec.input_key, step.input_json or {})
         artifact_records = await self.repository.list_artifacts(
             workflow.id,
@@ -47,14 +50,17 @@ class WorkerContextLoader:
             AgentArtifact(name=record.name, kind=record.kind, payload=record.payload_json or {})
             for record in artifact_records
         ]
-        memory_json = (workflow.plan_json or {}).get("memory_context")
-        memory_context = MemoryContext.model_validate(memory_json) if memory_json else None
-        tool_statuses = self._tool_statuses(worker.spec.required_tools)
-        tool_results = await self._run_tools(
+        tool_statuses = self._tool_statuses(worker.spec.allowed_tools)
+        tool_runtime = AgentToolRuntime(
+            agent_name=worker.spec.intent,
+            allowed_tools=worker.spec.allowed_tools,
             request=request,
-            slots=step.input_json or {},
-            allowed_tools=set(worker.spec.required_tools),
-            command=command,
+            registry=self.tool_registry,
+            step_slots=step.input_json or {},
+            workflow_id=workflow.id,
+            step_id=step.id,
+            trace_id=workflow.trace_id,
+            cancellation_check=lambda: self._raise_if_cancelled(workflow.id),
         )
         execution_step = ExecutionStep(
             index=int(step.step_key) if step.step_key.isdigit() else 0,
@@ -78,12 +84,12 @@ class WorkerContextLoader:
                 existing_artifacts=artifacts,
                 execution_step=execution_step,
                 tool_statuses=tool_statuses,
-                tool_results=[result.model_dump(mode="json") for result in tool_results],
+                tool_runtime=tool_runtime,
             ),
-            tool_results,
+            [],
         )
 
-    def _tool_statuses(self, required_tools: list[str]) -> list[dict[str, Any]]:
+    def _tool_statuses(self, allowed_tools: list[str]) -> list[dict[str, Any]]:
         statuses = {
             status.name: status.model_dump(mode="json")
             for status in self.tool_registry.list_availability()
@@ -101,42 +107,15 @@ class WorkerContextLoader:
                     "metadata": {},
                 },
             )
-            for name in required_tools
+            for name in allowed_tools
         ]
 
-    async def _run_tools(
-        self,
-        *,
-        request: ChatRequest,
-        slots: dict[str, Any],
-        allowed_tools: set[str],
-        command: AgentTaskCommand,
-    ) -> list[ToolCallResult]:
-        inputs = _extract_tool_inputs(request, slots)
-        executor = ToolExecutor(registry=self.tool_registry)
-        results: list[ToolCallResult] = []
-        for tool_name in sorted(inputs):
-            if tool_name not in allowed_tools:
-                continue
-            status = await self.session.scalar(
-                select(WorkflowRun.status).where(WorkflowRun.id == command.workflow_id)
-            )
-            if status in {"cancel_requested", "cancelled"}:
-                raise asyncio.CancelledError("Workflow cancellation requested before tool execution")
-            arguments = inputs[tool_name]
-            results.append(
-                await executor.run(
-                    ToolCallRequest(
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        approved=bool(arguments.get("approved", False)),
-                        user_id=request.user_id,
-                        conversation_id=request.conversation_id,
-                        trace_id=command.trace_id,
-                    )
-                )
-            )
-        return results
+    async def _raise_if_cancelled(self, workflow_id: str) -> None:
+        status = await self.session.scalar(
+            select(WorkflowRun.status).where(WorkflowRun.id == workflow_id)
+        )
+        if status in {"cancel_requested", "cancelled"}:
+            raise asyncio.CancelledError("Workflow cancellation requested before tool execution")
 
 
 def _request_for_step(request: ChatRequest, input_key: str | None, slots: dict) -> ChatRequest:
@@ -147,16 +126,13 @@ def _request_for_step(request: ChatRequest, input_key: str | None, slots: dict) 
     return request.model_copy(update={"agent_inputs": agent_inputs})
 
 
-def _extract_tool_inputs(request: ChatRequest, slots: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    inputs: dict[str, dict[str, Any]] = {}
-    for source in (
-        request.agent_inputs.get("tool_calls", {}),
-        request.agent_inputs.get("tools", {}),
-        slots.get("tool_calls", {}),
-        slots.get("tools", {}),
-    ):
-        if isinstance(source, dict):
-            for name, payload in source.items():
-                if isinstance(payload, dict):
-                    inputs[name] = payload
-    return inputs
+def _request_with_rewritten_query(
+    request: ChatRequest,
+    memory_context: MemoryContext | None,
+) -> ChatRequest:
+    if memory_context is None or not memory_context.query_rewrite.changed:
+        return request
+    rewritten_query = memory_context.query_rewrite.rewritten_query.strip()
+    if not rewritten_query or rewritten_query == request.message:
+        return request
+    return request.model_copy(update={"message": rewritten_query})

@@ -23,8 +23,14 @@ class DuckDuckGoHtmlProvider:
 
 
 class WebSearchClient:
-    def __init__(self, registry: WebSearchProviderRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: WebSearchProviderRegistry | None = None,
+        *,
+        raise_on_error: bool = False,
+    ) -> None:
         self.registry = registry or _default_registry()
+        self.raise_on_error = raise_on_error
 
     async def search(self, request: WebSearchRequest) -> WebSearchResponse:
         assumptions = [f"Used web search provider registry: {', '.join(self.registry.names())}."]
@@ -34,6 +40,8 @@ class WebSearchClient:
         try:
             sources = await provider.search(request)
         except Exception as exc:
+            if self.raise_on_error:
+                raise
             return WebSearchResponse(query=request.query, sources=[], assumptions=[*assumptions, f"Web search failed: {exc}"])
 
         return WebSearchResponse(

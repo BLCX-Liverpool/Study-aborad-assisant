@@ -11,7 +11,14 @@ from app.memory.short_term import InMemoryShortTermMemoryStore
 from app.memory.token_counter import TokenCounter
 from app.core.llm import ChatResponse
 from app.schemas.chat import ChatRequest, ChatTurn
-from app.schemas.memory import MemoryCandidateInput
+from app.schemas.memory import (
+    LongTermMemoryItem,
+    MemoryCandidateInput,
+    MemoryContext,
+    MemoryRoutingDecision,
+    QueryRewriteResult,
+    TopicContinuityResult,
+)
 from app.schemas.router import RouterOutput
 
 
@@ -66,6 +73,126 @@ def test_topic_continuity_and_query_rewrite() -> None:
     assert topic.relation in {"CONTINUE", "AMBIGUOUS"}
     assert rewrite.changed is True
     assert "COMP702" in rewrite.rewritten_query
+
+
+def test_topic_continuity_weights_embedding_similarity() -> None:
+    recent = [ChatTurn(role="user", content="我们继续讨论东京旅行预算和酒店。")]
+    detector = TopicContinuityDetector()
+
+    lexical_only = detector.detect("继续讨论东京旅行预算", recent)
+    semantic = detector.detect(
+        "继续讨论东京旅行预算",
+        recent,
+        semantic_similarity=0.92,
+    )
+
+    assert semantic.semantic_similarity == pytest.approx(0.92)
+    assert semantic.score > lexical_only.score
+    assert semantic.relation == "CONTINUE"
+
+
+@pytest.mark.asyncio
+async def test_memory_manager_uses_embeddings_for_topic_continuity() -> None:
+    class Embeddings:
+        async def embed_texts(self, texts):
+            assert len(texts) == 2
+            return [[1.0, 0.0], [1.0, 0.0]]
+
+    class Router:
+        async def route_async(self, **_kwargs):
+            return MemoryRoutingDecision(
+                need_short_term_memory=True,
+                need_long_term_memory=False,
+                memory_source=["short_term"],
+                namespaces=["travel"],
+                reason="test",
+            )
+
+    store = InMemoryShortTermMemoryStore()
+    await store.append("conv-1", ChatTurn(role="user", content="继续讨论东京旅行计划"))
+    manager = MemoryManager(
+        short_term_store=store,
+        embedding_service=Embeddings(),  # type: ignore[arg-type]
+        memory_router=Router(),  # type: ignore[arg-type]
+        query_rewriter=QueryRewriter(None),
+    )
+
+    context = await manager.build_context(
+        request=ChatRequest(user_id="user-1", message="继续讨论东京旅行预算"),
+        conversation_id="conv-1",
+        router_output=RouterOutput(primary_intent="travel", confidence=0.9),
+    )
+
+    assert context.topic.semantic_similarity == pytest.approx(1.0)
+    assert context.topic.relation == "CONTINUE"
+
+
+@pytest.mark.asyncio
+async def test_memory_context_is_rebuilt_after_rewritten_query_reroutes() -> None:
+    class Router:
+        async def route_async(self, *, router_output, **_kwargs):
+            namespace = "academic" if router_output.primary_intent == "assignment" else "travel"
+            return MemoryRoutingDecision(
+                need_short_term_memory=True,
+                need_long_term_memory=True,
+                memory_source=["short_term", "long_term"],
+                namespaces=[namespace],
+                reason="test",
+            )
+
+    class Repository:
+        def __init__(self) -> None:
+            self.namespaces = None
+
+        async def search(self, *, namespaces, **_kwargs):
+            self.namespaces = namespaces
+            return [
+                LongTermMemoryItem(
+                    id="academic-memory",
+                    namespace="academic",
+                    memory_type="user_preference",
+                    content="COMP702 coursework deadline is 10 October.",
+                    score=0.9,
+                )
+            ]
+
+    class Embeddings:
+        async def embed_texts(self, texts):
+            return [[1.0, 0.0] for _ in texts]
+
+    repository = Repository()
+    manager = MemoryManager(
+        long_term_repository=repository,  # type: ignore[arg-type]
+        memory_router=Router(),  # type: ignore[arg-type]
+        embedding_service=Embeddings(),  # type: ignore[arg-type]
+    )
+    initial = MemoryContext(
+        routing=MemoryRoutingDecision(
+            need_short_term_memory=True,
+            need_long_term_memory=True,
+            memory_source=["short_term", "long_term"],
+            namespaces=["travel"],
+            reason="initial route",
+        ),
+        topic=TopicContinuityResult(relation="CONTINUE", score=0.9),
+        query_rewrite=QueryRewriteResult(
+            original_query="那个 deadline 怎么安排",
+            rewritten_query="COMP702 coursework deadline 怎么安排",
+            changed=True,
+        ),
+        recent_messages=[ChatTurn(role="user", content="COMP702 coursework")],
+    )
+
+    rebuilt = await manager.rebuild_context_after_reroute(
+        request=ChatRequest(user_id="user-1", message="那个 deadline 怎么安排"),
+        router_output=RouterOutput(primary_intent="assignment", confidence=0.95),
+        memory_context=initial,
+    )
+
+    assert rebuilt.routing.namespaces == ["academic"]
+    assert repository.namespaces == ["academic"]
+    assert [memory.id for memory in rebuilt.long_term_memories] == ["academic-memory"]
+    assert "COMP702 coursework deadline" in rebuilt.prompt_context
 
 
 @pytest.mark.asyncio
@@ -129,6 +256,42 @@ async def test_memory_manager_updates_short_term_memory() -> None:
 
     assert [message.role for message in recent] == ["user", "assistant"]
     assert "£900" in recent[0].content
+
+
+@pytest.mark.asyncio
+async def test_memory_manager_can_defer_conversation_commit() -> None:
+    class FakeConversationRepository:
+        def __init__(self) -> None:
+            self.conversations = []
+            self.messages = []
+            self.commit_count = 0
+
+        async def ensure_conversation(self, **kwargs) -> None:
+            self.conversations.append(kwargs)
+
+        async def append_message(self, **kwargs) -> None:
+            self.messages.append(kwargs)
+
+        async def commit(self) -> None:
+            self.commit_count += 1
+
+    repository = FakeConversationRepository()
+    manager = MemoryManager(
+        short_term_store=InMemoryShortTermMemoryStore(),
+        conversation_repository=repository,  # type: ignore[arg-type]
+    )
+
+    await manager.update_after_response(
+        request=ChatRequest(user_id="user_1", conversation_id="conv_1", message="异步用户消息"),
+        conversation_id="conv_1",
+        response_text="异步助手回复",
+        router_output=RouterOutput(primary_intent="general_chat", confidence=0.9),
+        commit=False,
+    )
+
+    assert repository.conversations[0]["conversation_id"] == "conv_1"
+    assert [item["message"].role for item in repository.messages] == ["user", "assistant"]
+    assert repository.commit_count == 0
 
 
 @pytest.mark.asyncio

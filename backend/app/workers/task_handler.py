@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -27,6 +27,8 @@ from app.workflows.state_machine import StepStatus, WorkflowStatus
 from app.workers.context_loader import WorkerContextLoader
 from app.workers.result_service import WorkerResultService
 from app.workers.heartbeat import StepLeaseHeartbeat
+from app.tools.logging import ToolExecutionLogger
+from app.tools.models import ToolCallRequest, ToolCallResult
 
 
 class WorkerTaskHandler:
@@ -194,15 +196,21 @@ class WorkerTaskHandler:
                 retryable=False,
             )
             return
+        context = None
+        tool_runs_logged = False
         try:
             context, _tool_results = await WorkerContextLoader(self.session).load(command, worker)
             await self._raise_if_cancelled(workflow.id, "worker execution")
             result = await worker.run(context)
+            await self._persist_tool_runs(command, step, context.tool_results)
+            tool_runs_logged = True
             await self.session.refresh(workflow)
             if workflow.status == WorkflowStatus.CANCEL_REQUESTED.value:
                 raise asyncio.CancelledError("Workflow cancellation requested")
         except asyncio.CancelledError:
             await heartbeat.stop()
+            if context is not None and not tool_runs_logged:
+                await self._persist_tool_runs(command, step, context.tool_results)
             await result_service.persist_cancelled(
                 command=command,
                 workflow=workflow,
@@ -214,6 +222,8 @@ class WorkerTaskHandler:
             raise
         except Exception as exc:
             await heartbeat.stop()
+            if context is not None and not tool_runs_logged:
+                await self._persist_tool_runs(command, step, context.tool_results)
             await result_service.persist_failure(
                 command=command,
                 workflow=workflow,
@@ -228,6 +238,42 @@ class WorkerTaskHandler:
                 workflow=workflow,
                 step=step,
                 result=result,
+            )
+
+    async def _persist_tool_runs(
+        self,
+        command: AgentTaskCommand,
+        step,
+        tool_results: list[dict],
+    ) -> None:
+        if not tool_results:
+            return
+        agent_run_id = await self.session.scalar(
+            select(AgentRun.id).where(
+                AgentRun.workflow_id == command.workflow_id,
+                AgentRun.step_id == command.step_id,
+                AgentRun.attempt == step.attempt_count,
+            )
+        )
+        if agent_run_id is None:
+            return
+        logger = ToolExecutionLogger(self.session, agent_run_id=agent_run_id)
+        for item in tool_results:
+            result = ToolCallResult.model_validate(item)
+            completed_at = datetime.now(UTC)
+            duration_ms = result.duration_ms or 0.0
+            await logger.log(
+                ToolCallRequest(
+                    call_id=result.call_id,
+                    tool_name=result.tool_name,
+                    arguments=result.arguments,
+                    idempotency_key=f"{command.workflow_id}:{command.step_id}:{result.call_id or result.tool_name}",
+                    trace_id=command.trace_id,
+                ),
+                result,
+                started_at=completed_at - timedelta(milliseconds=duration_ms),
+                completed_at=completed_at,
+                duration_ms=duration_ms,
             )
 
     async def _raise_if_cancelled(self, workflow_id: str, boundary: str) -> None:

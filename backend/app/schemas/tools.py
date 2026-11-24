@@ -37,6 +37,7 @@ class WeatherLookupResponse(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
     source: str = "open-meteo"
     recoverable_error: str | None = None
+    retryable: bool = False
 
 
 __all__ = [

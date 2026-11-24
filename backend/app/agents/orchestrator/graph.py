@@ -20,10 +20,11 @@ from app.core.tracing import capture_latency_span, summarize_latency_spans
 from app.memory.manager import MemoryManager
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.schemas.execution import ExecutionStep, MultiIntentExecutionPlan, MultiIntentExecutionRequest
+from app.schemas.memory import MemoryContext
 from app.schemas.router import Intent, RouterOutput
-from app.tools.executor import ToolExecutor
-from app.tools.models import ToolCallRequest, ToolCallResult
+from app.tools.models import ToolCallResult
 from app.tools.registry import ToolRegistry, build_default_tool_registry
+from app.tools.runtime import AgentToolRuntime
 
 
 class OrchestratorGraphState(TypedDict, total=False):
@@ -188,19 +189,6 @@ class OrchestratorGraphRuntime:
                 memory.id for memory in memory_context.long_term_memories if memory.id
             ]
             span_output["query_rewritten"] = memory_context.query_rewrite.changed
-        state.memory_context = memory_context
-        state.add_trace(
-            "memory.context_prepared",
-            {
-                "source": memory_context.routing.memory_source,
-                "namespaces": memory_context.routing.namespaces,
-                "topic_relation": memory_context.topic.relation,
-                "query_rewritten": memory_context.query_rewrite.changed,
-                "long_term_count": len(memory_context.long_term_memories),
-                "memory_ids": [memory.id for memory in memory_context.long_term_memories if memory.id],
-            },
-        )
-
         if memory_context.query_rewrite.changed:
             async with self._span(
                 state,
@@ -216,6 +204,33 @@ class OrchestratorGraphRuntime:
                 )
                 span_output["primary_intent"] = router_output.primary_intent
                 span_output["confidence"] = router_output.confidence
+            async with self._span(
+                state,
+                span_name="memory.rebuild_after_reroute",
+                span_type="memory",
+                input_json={"primary_intent": router_output.primary_intent},
+            ) as span_output:
+                memory_context = await self.memory_manager.rebuild_context_after_reroute(
+                    request=request,
+                    router_output=router_output,
+                    memory_context=memory_context,
+                )
+                span_output["namespaces"] = memory_context.routing.namespaces
+                span_output["long_term_count"] = len(memory_context.long_term_memories)
+
+        state.memory_context = memory_context
+        state.add_trace(
+            "memory.context_prepared",
+            {
+                "source": memory_context.routing.memory_source,
+                "namespaces": memory_context.routing.namespaces,
+                "topic_relation": memory_context.topic.relation,
+                "semantic_similarity": memory_context.topic.semantic_similarity,
+                "query_rewritten": memory_context.query_rewrite.changed,
+                "long_term_count": len(memory_context.long_term_memories),
+                "memory_ids": [memory.id for memory in memory_context.long_term_memories if memory.id],
+            },
+        )
 
         state.router_output = router_output
         state.current_agent = router_output.primary_intent
@@ -316,27 +331,40 @@ class OrchestratorGraphRuntime:
                 result = not_implemented_result(intent)
                 span_output["implemented"] = False
             else:
+                worker_request = _request_with_rewritten_query(request, state.memory_context)
                 state.add_trace(
                     "worker.selected",
                     {
                         "intent": worker.spec.intent,
                         "input_schema": worker.spec.input_schema,
                         "output_artifact_kind": worker.spec.output_artifact_kind,
-                        "required_tools": worker.spec.required_tools,
+                        "allowed_tools": worker.spec.allowed_tools,
+                        "required_tools": worker.spec.allowed_tools,
                         "memory_namespaces": worker.spec.memory_namespaces,
                         "memory_count": _memory_count_for_worker(state, worker.spec.memory_namespaces),
                     },
                 )
                 agent_state = state.get_agent_state(worker.spec.intent)
-                agent_state.begin_run(run_id=state.run_id, trace_id=state.trace_id, request=request)
-                result = await worker.run(
-                    WorkerContext(
-                        request=request,
-                        agent_state=agent_state,
-                        memory_context=state.memory_context,
-                        existing_artifacts=state.artifacts,
-                    )
+                agent_state.begin_run(run_id=state.run_id, trace_id=state.trace_id, request=worker_request)
+                tool_statuses = self._tool_statuses_for_worker(worker.spec.allowed_tools)
+                worker_context = WorkerContext(
+                    request=worker_request,
+                    agent_state=agent_state,
+                    memory_context=state.memory_context,
+                    existing_artifacts=state.artifacts,
+                    tool_statuses=tool_statuses,
+                    tool_runtime=AgentToolRuntime(
+                        agent_name=worker.spec.intent,
+                        allowed_tools=worker.spec.allowed_tools,
+                        request=worker_request,
+                        registry=self.tool_registry,
+                        trace_id=state.trace_id,
+                    ),
                 )
+                result = await worker.run(worker_context)
+                for tool_result_json in worker_context.tool_results:
+                    state.tool_results.append(tool_result_json)
+                    agent_state.tool_results.append(tool_result_json)
                 span_output["implemented"] = True
                 span_output["artifact_count"] = len(result.artifacts)
                 span_output["missing_information_count"] = len(result.missing_information)
@@ -685,14 +713,12 @@ class OrchestratorGraphRuntime:
                 trace_events=[{"name": "worker.step_blocked", "payload": {"step": step.index, "intent": step.agent_intent}}],
             )
 
-        tool_statuses = self._tool_statuses_for_worker(worker.spec.required_tools)
-        tool_results, tool_trace_events = await self._run_worker_tool_calls(
-            state=state,
-            request=request,
-            step=step,
-            required_tools=worker.spec.required_tools,
+        tool_statuses = self._tool_statuses_for_worker(worker.spec.allowed_tools)
+        step_request = _request_for_step(
+            _request_with_rewritten_query(request, state.memory_context),
+            worker.spec.input_key,
+            step,
         )
-        step_request = _request_for_step(request, worker.spec.input_key, step)
         trace_events = [
             {
                 "name": "worker.selected",
@@ -701,14 +727,15 @@ class OrchestratorGraphRuntime:
                     "step": step.index,
                     "input_schema": worker.spec.input_schema,
                     "output_artifact_kind": worker.spec.output_artifact_kind,
-                    "required_tools": worker.spec.required_tools,
+                    "allowed_tools": worker.spec.allowed_tools,
+                    "required_tools": worker.spec.allowed_tools,
                     "memory_namespaces": worker.spec.memory_namespaces,
                     "memory_count": _memory_count_for_worker(state, worker.spec.memory_namespaces),
                     "tool_statuses": tool_statuses,
                 },
             },
-            *tool_trace_events,
         ]
+        tool_results: list[ToolCallResult] = []
         async with self._span(
             state,
             span_name=f"worker.{worker.spec.intent}.step_{step.index}",
@@ -722,16 +749,37 @@ class OrchestratorGraphRuntime:
             try:
                 agent_state = state.get_agent_state(worker.spec.intent)
                 agent_state.begin_run(run_id=state.run_id, trace_id=state.trace_id, request=step_request)
-                worker_result = await worker.run(
-                    WorkerContext(
+                worker_context = WorkerContext(
+                    request=step_request,
+                    agent_state=agent_state,
+                    memory_context=state.memory_context,
+                    existing_artifacts=existing_artifacts_snapshot,
+                    execution_step=step,
+                    tool_statuses=tool_statuses,
+                    tool_runtime=AgentToolRuntime(
+                        agent_name=worker.spec.intent,
+                        allowed_tools=worker.spec.allowed_tools,
                         request=step_request,
-                        agent_state=agent_state,
-                        memory_context=state.memory_context,
-                        existing_artifacts=existing_artifacts_snapshot,
-                        execution_step=step,
-                        tool_statuses=tool_statuses,
-                        tool_results=[result.model_dump(mode="json") for result in tool_results],
-                    )
+                        registry=self.tool_registry,
+                        step_slots=step.slots,
+                        trace_id=state.trace_id,
+                    ),
+                )
+                worker_result = await worker.run(worker_context)
+                tool_results = [ToolCallResult.model_validate(item) for item in worker_context.tool_results]
+                trace_events.extend(
+                    {
+                        "name": "tool.executed",
+                        "payload": {
+                            "step": step.index,
+                            "tool_name": result.tool_name,
+                            "success": result.success,
+                            "attempts": result.attempts,
+                            "degraded": result.degraded,
+                            "cached": result.cached,
+                        },
+                    }
+                    for result in tool_results
                 )
                 span_output["artifact_count"] = len(worker_result.artifacts)
                 span_output["missing_information_count"] = len(worker_result.missing_information)
@@ -773,8 +821,8 @@ class OrchestratorGraphRuntime:
             trace_events=trace_events,
         )
 
-    def _tool_statuses_for_worker(self, required_tools: list[str]) -> list[dict[str, Any]]:
-        if not required_tools:
+    def _tool_statuses_for_worker(self, allowed_tools: list[str]) -> list[dict[str, Any]]:
+        if not allowed_tools:
             return []
         statuses_by_name = {
             status.name: status.model_dump(mode="json")
@@ -794,60 +842,8 @@ class OrchestratorGraphRuntime:
                     "metadata": {},
                 },
             )
-            for tool_name in required_tools
+            for tool_name in allowed_tools
         ]
-
-    async def _run_worker_tool_calls(
-        self,
-        *,
-        state: AgentState,
-        request: ChatRequest,
-        step: ExecutionStep,
-        required_tools: list[str],
-    ) -> tuple[list[ToolCallResult], list[dict[str, Any]]]:
-        tool_inputs = _extract_tool_inputs(request, step)
-        if not tool_inputs:
-            return [], []
-        results: list[ToolCallResult] = []
-        trace_events: list[dict[str, Any]] = []
-        executor = ToolExecutor(registry=self.tool_registry)
-        allowed_tools = set(required_tools) | set(tool_inputs)
-        for tool_name in sorted(allowed_tools):
-            if tool_name not in tool_inputs:
-                continue
-            async with self._span(
-                state,
-                span_name=f"tool.{tool_name}.step_{step.index}",
-                span_type="tool",
-                input_json={"step": step.index, "tool_name": tool_name},
-            ) as span_output:
-                result = await executor.run(
-                    ToolCallRequest(
-                        tool_name=tool_name,
-                        arguments=tool_inputs[tool_name],
-                        approved=bool(tool_inputs[tool_name].get("approved", False)),
-                        user_id=state.user_id,
-                        conversation_id=state.conversation_id,
-                        trace_id=state.trace_id,
-                    )
-                )
-                span_output["success"] = result.success
-                span_output["requires_approval"] = result.requires_approval
-                if result.error:
-                    span_output["error"] = result.error
-                results.append(result)
-                trace_events.append(
-                    {
-                        "name": "tool.executed",
-                        "payload": {
-                            "step": step.index,
-                            "tool_name": tool_name,
-                            "success": result.success,
-                            "requires_approval": result.requires_approval,
-                        },
-                    }
-                )
-        return results, trace_events
 
 
 def _apply_worker_result(state: AgentState, result: WorkerRunResult, *, agent_name: str | None = None) -> None:
@@ -888,20 +884,16 @@ def _request_for_step(request: ChatRequest, input_key: str | None, step: Executi
     return request.model_copy(update={"agent_inputs": agent_inputs})
 
 
-def _extract_tool_inputs(request: ChatRequest, step: ExecutionStep) -> dict[str, dict[str, Any]]:
-    tool_inputs: dict[str, dict[str, Any]] = {}
-    sources = [
-        request.agent_inputs.get("tool_calls", {}),
-        request.agent_inputs.get("tools", {}),
-        step.slots.get("tool_calls", {}),
-        step.slots.get("tools", {}),
-    ]
-    for source in sources:
-        if isinstance(source, dict):
-            for tool_name, payload in source.items():
-                if isinstance(payload, dict):
-                    tool_inputs[tool_name] = payload
-    return tool_inputs
+def _request_with_rewritten_query(
+    request: ChatRequest,
+    memory_context: MemoryContext | None,
+) -> ChatRequest:
+    if memory_context is None or not memory_context.query_rewrite.changed:
+        return request
+    rewritten_query = memory_context.query_rewrite.rewritten_query.strip()
+    if not rewritten_query or rewritten_query == request.message:
+        return request
+    return request.model_copy(update={"message": rewritten_query})
 
 
 def _stable_slots_key(slots: dict[str, Any]) -> str:

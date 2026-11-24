@@ -14,6 +14,9 @@ class ArxivSearchTool:
         description="Search ArXiv for assignment research sources.",
         permission_level=PermissionLevel.SEARCH,
         input_schema=ArxivSearchRequest.model_json_schema(),
+        external_api=True,
+        timeout_seconds=15.0,
+        max_attempts=3,
     )
 
     async def run(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -27,11 +30,14 @@ class WebSearchTool:
         description="Search the web for assignment research sources.",
         permission_level=PermissionLevel.SEARCH,
         input_schema=WebSearchRequest.model_json_schema(),
+        external_api=True,
+        timeout_seconds=15.0,
+        max_attempts=3,
     )
 
     async def run(self, arguments: dict[str, Any]) -> dict[str, Any]:
         request = WebSearchRequest.model_validate(arguments)
-        return (await WebSearchClient().search(request)).model_dump(mode="json")
+        return (await WebSearchClient(raise_on_error=True).search(request)).model_dump(mode="json")
 
 
 class ReminderDraftTool:

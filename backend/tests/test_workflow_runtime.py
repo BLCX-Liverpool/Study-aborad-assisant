@@ -12,7 +12,11 @@ from app.schemas.memory import MemoryContext, MemoryRoutingDecision, QueryRewrit
 from app.schemas.router import RouterOutput, StructuredIntent
 from app.schemas.workflow import ChatV2Request
 from app.workers.task_handler import is_retryable_error
+from app.workers.context_loader import WorkerContextLoader
+from app.agents.orchestrator.workers import WorkerAgentSpec
 from app.workflows.planner import DurableWorkflowPlanner, _execution_plan
+from app.workflows.event_handler import WorkflowEventHandler
+from app.workflows.runtime import WorkflowEventRuntime
 from app.workflows.service import ExecutionPolicy
 from app.workflows.state_machine import (
     InvalidStateTransition,
@@ -184,6 +188,9 @@ async def test_durable_planner_reroutes_rewritten_query_before_building_steps(mo
             return rewritten
 
     class Memory:
+        def __init__(self) -> None:
+            self.rebuilt_with = None
+
         async def build_context(self, **_kwargs):
             return MemoryContext(
                 routing=MemoryRoutingDecision(reason="test"),
@@ -194,6 +201,20 @@ async def test_durable_planner_reroutes_rewritten_query_before_building_steps(mo
                     changed=True,
                 ),
                 prompt_context="user: COMP702 coursework 在 10 月 10 日截止",
+            )
+
+        async def rebuild_context_after_reroute(self, *, request, router_output, memory_context):
+            self.rebuilt_with = router_output.primary_intent
+            return memory_context.model_copy(
+                update={
+                    "routing": MemoryRoutingDecision(
+                        need_short_term_memory=True,
+                        need_long_term_memory=True,
+                        memory_source=["short_term", "long_term"],
+                        namespaces=["academic"],
+                        reason="Rebuilt from the rewritten assignment route.",
+                    )
+                }
             )
 
     class WorkflowServiceStub:
@@ -207,13 +228,87 @@ async def test_durable_planner_reroutes_rewritten_query_before_building_steps(mo
     monkeypatch.setattr("app.workflows.planner.WorkflowService", WorkflowServiceStub)
     repository = Repository()
     router = Router()
+    memory = Memory()
 
-    await DurableWorkflowPlanner(repository, router=router, memory_manager=Memory()).prepare(workflow.id)
+    await DurableWorkflowPlanner(repository, router=router, memory_manager=memory).prepare(workflow.id)
 
     assert router.calls[0][0] == "COMP702 coursework 的 deadline 怎么安排？"
     assert router.calls[0][1]["conversation_context"].startswith("user: COMP702")
     assert workflow.plan_json["router"]["primary_intent"] == "assignment"
+    assert workflow.plan_json["memory_context"]["routing"]["namespaces"] == ["academic"]
+    assert memory.rebuilt_with == "assignment"
     assert repository.created_steps[0]["agent_intent"] == "assignment"
+
+
+@pytest.mark.asyncio
+async def test_worker_context_loader_uses_rewritten_query() -> None:
+    memory_context = MemoryContext(
+        routing=MemoryRoutingDecision(reason="test"),
+        topic=TopicContinuityResult(relation="CONTINUE", score=0.9),
+        query_rewrite=QueryRewriteResult(
+            original_query="那个计划继续做",
+            rewritten_query="继续制定伦敦三日旅行计划",
+            changed=True,
+        ),
+    )
+    workflow = SimpleNamespace(
+        id="workflow-1",
+        trace_id="trace-1",
+        input_json={
+            "chat_request": ChatV2Request(
+                user_id="user-1",
+                conversation_id="conversation-1",
+                message="那个计划继续做",
+            ).model_dump(mode="json")
+        },
+        plan_json={"memory_context": memory_context.model_dump(mode="json")},
+    )
+    step = SimpleNamespace(
+        id="step-1",
+        step_key="0",
+        intent_name="travel.plan",
+        agent_intent="travel",
+        input_json={"destination": "London"},
+        result_summary=None,
+    )
+
+    class Repository:
+        async def get(self, workflow_id):
+            assert workflow_id == workflow.id
+            return workflow
+
+        async def get_step(self, step_id, *, workflow_id):
+            assert step_id == step.id
+            assert workflow_id == workflow.id
+            return step
+
+        async def list_artifacts(self, workflow_id, *, artifact_ids):
+            assert workflow_id == workflow.id
+            assert artifact_ids == []
+            return []
+
+    loader = WorkerContextLoader(object())  # type: ignore[arg-type]
+    loader.repository = Repository()  # type: ignore[assignment]
+    worker = SimpleNamespace(
+        spec=WorkerAgentSpec(
+            intent="travel",
+            input_key="travel",
+            input_schema="TravelPlanRequest",
+        )
+    )
+    command = AgentTaskCommand(
+        workflow_id=workflow.id,
+        step_id=step.id,
+        agent="travel",
+        trace_id=workflow.trace_id,
+        input_ref=f"workflow-input:{workflow.id}",
+    )
+
+    context, tool_results = await loader.load(command, worker)  # type: ignore[arg-type]
+
+    assert context.request.message == "继续制定伦敦三日旅行计划"
+    assert context.request.agent_inputs["travel"]["destination"] == "London"
+    assert tool_results == []
 
 
 def test_retry_classification_separates_transient_and_permanent_errors() -> None:
@@ -221,6 +316,102 @@ def test_retry_classification_separates_transient_and_permanent_errors() -> None
     assert is_retryable_error(httpx.ConnectError("network")) is True
     assert is_retryable_error(PermissionError()) is False
     assert is_retryable_error(LookupError()) is False
+
+
+@pytest.mark.asyncio
+async def test_workflow_event_runtime_wires_conversation_repository(monkeypatch) -> None:
+    session = object()
+    captured = {}
+
+    class SessionContext:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class CapturingHandler:
+        def __init__(self, handler_session, *, consumer_name, memory_manager) -> None:
+            assert handler_session is session
+            captured["consumer_name"] = consumer_name
+            captured["memory_manager"] = memory_manager
+
+        async def handle(self, event) -> None:
+            captured["event"] = event
+
+    event = SimpleNamespace(message_id="event-1")
+    message = SimpleNamespace(type="agent.step.completed", body=b"{}")
+    monkeypatch.setattr("app.workflows.runtime.get_session_factory", lambda: lambda: SessionContext())
+    monkeypatch.setattr("app.workflows.runtime.get_redis", lambda: object())
+    monkeypatch.setattr("app.workflows.runtime.deserialize_message", lambda *_args: event)
+    monkeypatch.setattr("app.workflows.runtime.WorkflowEventHandler", CapturingHandler)
+
+    await WorkflowEventRuntime().handle_message(message)
+
+    memory_manager = captured["memory_manager"]
+    assert memory_manager.conversation_repository is not None
+    assert memory_manager.conversation_repository.session is session
+    assert captured["event"] is event
+
+
+@pytest.mark.asyncio
+async def test_workflow_completion_defers_memory_commit_to_event_transaction() -> None:
+    class Repository:
+        async def list_steps(self, workflow_id):
+            assert workflow_id == "workflow-1"
+            return [SimpleNamespace(status="completed", result_summary="异步助手回复")]
+
+        async def transition_workflow(self, workflow, target):
+            workflow.status = target.value
+            return True
+
+        async def list_artifacts(self, workflow_id):
+            assert workflow_id == "workflow-1"
+            return []
+
+    class MemoryManagerStub:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        async def update_after_response(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class Dispatcher:
+        async def dispatch(self, **_kwargs) -> None:
+            return None
+
+    memory_manager = MemoryManagerStub()
+    handler = WorkflowEventHandler(object(), memory_manager=memory_manager)  # type: ignore[arg-type]
+    handler.repository = Repository()  # type: ignore[assignment]
+    handler.dispatcher = Dispatcher()  # type: ignore[assignment]
+    workflow = SimpleNamespace(
+        id="workflow-1",
+        trace_id="trace-1",
+        conversation_id="conversation-1",
+        status="running",
+        final_response=None,
+        input_json={
+            "chat_request": ChatV2Request(
+                user_id="user-1",
+                conversation_id="conversation-1",
+                message="异步用户消息",
+            ).model_dump(mode="json")
+        },
+        plan_json={
+            "router": RouterOutput(
+                primary_intent="general_chat",
+                confidence=0.9,
+            ).model_dump(mode="json")
+        },
+    )
+
+    await handler._finalize_if_ready(workflow)
+
+    assert workflow.status == "completed"
+    assert memory_manager.kwargs is not None
+    assert memory_manager.kwargs["conversation_id"] == "conversation-1"
+    assert memory_manager.kwargs["response_text"] == "异步助手回复"
+    assert memory_manager.kwargs["commit"] is False
 
 
 @pytest.mark.asyncio

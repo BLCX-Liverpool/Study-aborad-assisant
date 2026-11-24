@@ -24,11 +24,28 @@ CONTINUATION_SIGNALS = (
 )
 NEW_TOPIC_SIGNALS = ("换个话题", "另外", "新的", "new topic", "unrelated")
 
+CONTINUATION_WEIGHT = 0.20
+ENTITY_OVERLAP_WEIGHT = 0.15
+LEXICAL_OVERLAP_WEIGHT = 0.15
+SEMANTIC_SIMILARITY_WEIGHT = 0.35
+RECENT_TURN_WEIGHT = 0.15
+NEW_TOPIC_PENALTY = 0.30
+
 
 class TopicContinuityDetector:
-    def detect(self, query: str, recent_messages: list[ChatTurn]) -> TopicContinuityResult:
+    def detect(
+        self,
+        query: str,
+        recent_messages: list[ChatTurn],
+        *,
+        semantic_similarity: float | None = None,
+    ) -> TopicContinuityResult:
         if not recent_messages:
-            return TopicContinuityResult(relation="NEW_TOPIC", score=0.0)
+            return TopicContinuityResult(
+                relation="NEW_TOPIC",
+                score=0.0,
+                semantic_similarity=semantic_similarity,
+            )
 
         recent_text = " ".join(message.content for message in recent_messages[-5:])
         query_entities = _entities(query)
@@ -39,16 +56,32 @@ class TopicContinuityDetector:
         new_topic_penalty = 1.0 if _contains_any(query, NEW_TOPIC_SIGNALS) else 0.0
         recent_turn_score = min(len(recent_messages) / 5, 1.0)
 
-        score = (
-            0.25 * continuation_score
-            + 0.25 * entity_overlap
-            + 0.25 * lexical_overlap
-            + 0.15 * recent_turn_score
-            - 0.25 * new_topic_penalty
-        )
+        if semantic_similarity is None:
+            # Preserve deterministic routing when embeddings are unavailable.
+            score = (
+                0.25 * continuation_score
+                + 0.25 * entity_overlap
+                + 0.25 * lexical_overlap
+                + 0.15 * recent_turn_score
+                - 0.25 * new_topic_penalty
+            )
+            continue_threshold = 0.75
+        else:
+            semantic_similarity = max(0.0, min(semantic_similarity, 1.0))
+            score = (
+                CONTINUATION_WEIGHT * continuation_score
+                + ENTITY_OVERLAP_WEIGHT * entity_overlap
+                + LEXICAL_OVERLAP_WEIGHT * lexical_overlap
+                + SEMANTIC_SIMILARITY_WEIGHT * semantic_similarity
+                + RECENT_TURN_WEIGHT * recent_turn_score
+                - NEW_TOPIC_PENALTY * new_topic_penalty
+            )
+            # High semantic similarity plus an explicit continuation signal is
+            # sufficient even when Chinese lexical chunking has little overlap.
+            continue_threshold = 0.55
         score = max(0.0, min(1.0, score))
 
-        if score >= 0.75:
+        if score >= continue_threshold:
             relation = "CONTINUE"
         elif score <= 0.30:
             relation = "NEW_TOPIC"
@@ -58,6 +91,7 @@ class TopicContinuityDetector:
         return TopicContinuityResult(
             relation=relation,
             score=score,
+            semantic_similarity=semantic_similarity,
             active_entities=sorted(query_entities | recent_entities)[:12],
             topic_summary=_topic_summary(recent_messages),
             needs_llm_judgement=relation == "AMBIGUOUS",

@@ -21,6 +21,9 @@ class BrowserMcpRuntime:
         capability="browser_search_extract",
         provider_name="browser_mcp",
         required_env=["BROWSER_MCP_ENABLED"],
+        external_api=True,
+        timeout_seconds=30.0,
+        max_attempts=3,
         input_schema={
             "type": "object",
             "properties": {
@@ -91,6 +94,7 @@ class BrowserMcpRuntime:
                 raw_result=None,
                 recoverable_error=degraded.recoverable_error,
                 tool_name=tool_name,
+                retryable=_is_transient_provider_error(exc),
             )
 
         return _browser_result(
@@ -318,6 +322,7 @@ def _browser_result(
     raw_result: dict[str, Any] | None,
     recoverable_error: str | None = None,
     tool_name: str | None = None,
+    retryable: bool = False,
 ) -> dict[str, Any]:
     return {
         "provider_status": status.model_dump(mode="json"),
@@ -327,8 +332,17 @@ def _browser_result(
         "transport": status.metadata.get("transport"),
         "source": "browser_mcp",
         "recoverable_error": recoverable_error,
+        "retryable": retryable,
         "assumptions": [
             "Browser MCP may navigate external pages and extracted content should be treated as provider data.",
             "No form submission, purchase, login, or destructive browser action is requested by this tool.",
         ],
     }
+
+
+def _is_transient_provider_error(error: Exception) -> bool:
+    if isinstance(error, (TimeoutError, ConnectionError, httpx.TimeoutException, httpx.TransportError)):
+        return True
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code in {408, 429} or error.response.status_code >= 500
+    return False

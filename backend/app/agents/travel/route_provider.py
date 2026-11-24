@@ -9,6 +9,7 @@ from app.schemas.travel import (
 )
 from app.tools.mcp_adapters import GoogleMapsDirectionsTool, GoogleMapsPlacesTool
 from app.tools.models import ToolAvailabilityStatus
+from app.tools.models import ToolCallResult
 
 
 @dataclass
@@ -172,6 +173,24 @@ def _provider_result_from_payloads(route_payloads: list[dict], place_payloads: l
         place_suggestions=_dedupe_places(places),
         tool_statuses=_dedupe_statuses(statuses),
     )
+
+
+def provider_result_from_tool_results(
+    request: TravelPlanRequest | TravelItineraryRequest,
+    results: list[ToolCallResult],
+) -> TravelProviderResult:
+    route_payloads = [
+        result.output
+        for result in results
+        if result.success and result.tool_name == "travel.maps.directions"
+    ]
+    place_payloads = [
+        result.output
+        for result in results
+        if result.success and result.tool_name == "travel.maps.places"
+    ]
+    provider_result = _provider_result_from_payloads(route_payloads, place_payloads)
+    return TravelRouteProvider()._with_local_fallback(request, provider_result)
 
 
 def _routes_from_payload(payload: dict) -> list[RouteSuggestion]:

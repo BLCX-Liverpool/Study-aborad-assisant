@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from app.agents.assignment.extractor import AssignmentRequirementExtractor
 from app.agents.assignment.service import AssignmentAnalysisService
@@ -12,6 +12,7 @@ from app.agents.email.draft_generator import EmailDraftGenerator
 from app.agents.email.input_extractor import EmailInputExtractor
 from app.agents.email.service import EmailAgentService
 from app.agents.finance.input_extractor import FinanceInputExtractor
+from app.agents.finance.exchange_rates import ToolResultExchangeRateProvider
 from app.agents.finance.service import FinanceAgentService
 from app.agents.fitness.input_extractor import FitnessInputExtractor
 from app.agents.fitness.service import FitnessAgentService
@@ -20,7 +21,6 @@ from app.agents.orchestrator.state import AgentScopedState
 from app.agents.notice.parser import NoticeActionParser
 from app.agents.planner.input_extractor import PlanningInputExtractor
 from app.agents.planner.service import TaskPlannerService
-from app.agents.research.workflow import AssignmentResearchWorkflow
 from app.agents.social_content.input_extractor import (
     SocialContentInputExtractor,
     fallback_social_content_payload,
@@ -36,17 +36,17 @@ from app.core.llm import get_stage_llm_client
 from app.documents.parser import DoclingDocumentParser
 from app.schemas.execution import ExecutionStep
 from app.schemas.action import ActionItem, NoticeParseRequest
-from app.schemas.assignment import AssignmentAnalysis
 from app.schemas.chat import AgentArtifact, ChatRequest
 from app.schemas.email import EmailDraftRequest
 from app.schemas.finance import FinancePlanRequest
 from app.schemas.fitness import FitnessPlanRequest
 from app.schemas.memory import MemoryContext
 from app.schemas.planner import AssignmentPlanningRequest, GlobalPlanningRequest, ScheduleBlock
-from app.schemas.research import ResearchWorkflowRequest
 from app.schemas.router import Intent
 from app.schemas.social_content import SocialContentRequest
 from app.schemas.travel import TravelPlanRequest
+from app.tools.models import ToolCallResult
+from app.tools.runtime import AgentToolRuntime, ToolExecutionBatch
 from app.schemas.wellbeing import WellbeingSupportRequest
 
 
@@ -55,12 +55,22 @@ class WorkerAgentSpec(BaseModel):
     input_key: str | None = None
     input_schema: str
     output_artifact_kind: str | None = None
-    required_tools: list[str] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("allowed_tools", "required_tools"),
+    )
     missing_information_contract: list[str] = Field(default_factory=list)
     memory_namespaces: list[str] = Field(default_factory=list)
 
+    @property
+    def required_tools(self) -> list[str]:
+        """Backward-compatible read alias; tools are optional capabilities, not mandatory calls."""
+        return self.allowed_tools
+
 
 class WorkerContext(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     request: ChatRequest
     agent_state: AgentScopedState | None = None
     memory_context: MemoryContext | None = None
@@ -68,6 +78,18 @@ class WorkerContext(BaseModel):
     execution_step: ExecutionStep | None = None
     tool_statuses: list[dict[str, Any]] = Field(default_factory=list)
     tool_results: list[dict[str, Any]] = Field(default_factory=list)
+    tool_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    tool_runtime: AgentToolRuntime | None = Field(default=None, exclude=True)
+
+    async def run_tools(self, business_context: dict[str, Any]) -> ToolExecutionBatch:
+        if self.tool_runtime is None:
+            return ToolExecutionBatch(
+                results=[ToolCallResult.model_validate(result) for result in self.tool_results]
+            )
+        batch = await self.tool_runtime.run(business_context)
+        self.tool_results = [result.model_dump(mode="json") for result in batch.results]
+        self.tool_decisions = [decision.model_dump(mode="json") for decision in batch.decisions]
+        return batch
 
 
 class WorkerRunResult(BaseModel):
@@ -136,7 +158,7 @@ class TravelWorker:
         input_key="travel",
         input_schema="TravelPlanRequest",
         output_artifact_kind="travel_plan",
-        required_tools=["weather.lookup", "travel.maps.directions", "travel.maps.places"],
+        allowed_tools=["weather.lookup", "travel.maps.directions", "travel.maps.places"],
         memory_namespaces=["travel"],
         missing_information_contract=["travel.origin", "travel.destination"],
     )
@@ -196,13 +218,15 @@ class TravelWorker:
                 context.agent_state.metadata["last_purpose_classification"] = purpose_classification.model_dump()
 
         travel_request = TravelPlanRequest.model_validate(payload)
-        plan = await TravelAgentService().plan_async(travel_request)
+        tool_batch = await context.run_tools(travel_request.model_dump(mode="json"))
+        plan = await TravelAgentService().plan_async(travel_request, tool_results=tool_batch.results)
         trace_events = [
             {
                 "name": "worker.completed",
                 "payload": {"agent": "travel", "tasks": len(plan.checklist), "purpose": travel_request.purpose},
             }
         ]
+        trace_events.extend(_tool_trace_events(tool_batch))
         if purpose_classification is not None:
             trace_events.insert(
                 0,
@@ -219,6 +243,7 @@ class TravelWorker:
         return WorkerRunResult(
             final_response=plan.summary,
             artifacts=[AgentArtifact(name="Travel Plan", kind="travel_plan", payload=plan.model_dump())],
+            missing_information=tool_batch.missing_information,
             next_actions=plan.booking_questions,
             trace_events=trace_events,
         )
@@ -230,7 +255,7 @@ class FinanceWorker:
         input_key="finance",
         input_schema="FinancePlanRequest",
         output_artifact_kind="finance_plan",
-        required_tools=["finance.exchange_rate"],
+        allowed_tools=["finance.exchange_rate"],
         memory_namespaces=["finance"],
     )
 
@@ -270,10 +295,14 @@ class FinanceWorker:
                 ],
             )
         finance_request = FinancePlanRequest.model_validate(payload)
-        plan = FinanceAgentService().plan_budget(finance_request)
+        tool_batch = await context.run_tools(finance_request.model_dump(mode="json"))
+        plan = FinanceAgentService(
+            exchange_rate_provider=ToolResultExchangeRateProvider(tool_batch.results)
+        ).plan_budget(finance_request)
         return WorkerRunResult(
             final_response=f"已生成预算分析：预计月结余为 {plan.currency} {plan.projected_monthly_balance:.2f}。",
             artifacts=[AgentArtifact(name="Finance Budget", kind="finance_plan", payload=plan.model_dump())],
+            missing_information=tool_batch.missing_information,
             next_actions=[item.title for item in plan.action_items[:3]],
             trace_events=[
                 {
@@ -284,7 +313,8 @@ class FinanceWorker:
                         "monthly_balance": plan.projected_monthly_balance,
                         "extracted": bool(extraction.payload),
                     },
-                }
+                },
+                *_tool_trace_events(tool_batch),
             ],
         )
 
@@ -420,7 +450,7 @@ class TaskPlanningWorker:
         input_key="planner",
         input_schema="AssignmentPlanningRequest | MultiIntentExecutionPlan",
         output_artifact_kind="planner_output",
-        required_tools=["reminder.draft", "calendar.event.draft"],
+        allowed_tools=["reminder.draft", "calendar.event.draft"],
         memory_namespaces=["planner"],
         missing_information_contract=["planner.assignment"],
     )
@@ -436,6 +466,7 @@ class TaskPlanningWorker:
         if execution_artifact is not None:
             payload = execution_artifact.payload
             if payload.get("planner_output"):
+                tool_batch = await context.run_tools(payload["planner_output"])
                 return WorkerRunResult(
                     final_response=payload.get("summary", "已生成多意图执行计划。"),
                     artifacts=[
@@ -443,8 +474,10 @@ class TaskPlanningWorker:
                             name="Task Plan",
                             kind="planner_output",
                             payload=payload["planner_output"],
-                        )
+                        ),
+                        *_tool_result_artifacts(tool_batch),
                     ],
+                    missing_information=tool_batch.missing_information,
                     next_actions=[reminder["title"] for reminder in payload.get("email_reminder_drafts", [])[:3]],
                     trace_events=[
                         {
@@ -454,7 +487,8 @@ class TaskPlanningWorker:
                                 "tasks": len(payload["planner_output"].get("tasks", [])),
                                 "reminders": len(payload.get("email_reminder_drafts", [])),
                             },
-                        }
+                        },
+                        *_tool_trace_events(tool_batch),
                     ],
                 )
 
@@ -501,9 +535,14 @@ class TaskPlanningWorker:
                 memory_preferences=_memory_preferences_for(context, ["planner"]),
             )
             plan = await TaskPlannerService().plan_global(planning_request)
+            tool_batch = await context.run_tools(plan.model_dump(mode="json"))
             return WorkerRunResult(
                 final_response=f"已生成全局任务计划：{len(plan.tasks)} 个任务，{len(plan.events)} 个事件，{len(plan.reminders)} 个提醒草稿。",
-                artifacts=[AgentArtifact(name="Task Plan", kind="planner_output", payload=plan.model_dump())],
+                artifacts=[
+                    AgentArtifact(name="Task Plan", kind="planner_output", payload=plan.model_dump()),
+                    *_tool_result_artifacts(tool_batch),
+                ],
+                missing_information=tool_batch.missing_information,
                 trace_events=[
                     {
                         "name": "worker.completed",
@@ -514,20 +553,27 @@ class TaskPlanningWorker:
                             "events": len(plan.events),
                             "reminders": len(plan.reminders),
                         },
-                    }
+                    },
+                    *_tool_trace_events(tool_batch),
                 ],
             )
 
         planning_request = AssignmentPlanningRequest.model_validate(payload)
         plan = TaskPlannerService().plan_assignment(planning_request)
+        tool_batch = await context.run_tools(plan.model_dump(mode="json"))
         return WorkerRunResult(
             final_response=f"已生成学习计划：{len(plan.tasks)} 个任务，{len(plan.reminders)} 个提醒草稿。",
-            artifacts=[AgentArtifact(name="Task Plan", kind="planner_output", payload=plan.model_dump())],
+            artifacts=[
+                AgentArtifact(name="Task Plan", kind="planner_output", payload=plan.model_dump()),
+                *_tool_result_artifacts(tool_batch),
+            ],
+            missing_information=tool_batch.missing_information,
             trace_events=[
                 {
                     "name": "worker.completed",
                     "payload": {"agent": "planner", "tasks": len(plan.tasks), "reminders": len(plan.reminders)},
-                }
+                },
+                *_tool_trace_events(tool_batch),
             ],
         )
 
@@ -581,7 +627,7 @@ class AssignmentWorker:
         input_key="assignment",
         input_schema="AssignmentAnalysisRequest",
         output_artifact_kind="assignment_analysis",
-        required_tools=["research.arxiv.search", "research.web.search", "browser.mcp.search_extract"],
+        allowed_tools=["research.arxiv.search", "research.web.search", "browser.mcp.search_extract"],
         memory_namespaces=["assignment"],
         missing_information_contract=["assignment.source_path", "assignment.file_id"],
     )
@@ -623,50 +669,27 @@ class AssignmentWorker:
         artifacts = [AgentArtifact(name="Assignment Analysis", kind="assignment_analysis", payload=artifact_payload)]
         next_actions = []
         trace_events = [{"name": "worker.completed", "payload": {"agent": "assignment"}}]
-        try:
-            research = await AssignmentResearchWorkflow().run(
-                ResearchWorkflowRequest(
-                    user_id=context.request.user_id,
-                    assignment=result.analysis,
-                    include_web=False,
-                    include_arxiv=True,
-                    max_results_per_query=3,
-                )
-            )
-            artifacts.append(
-                AgentArtifact(
-                    name="ArXiv Paper Candidates",
-                    kind="arxiv_source_candidates",
-                    payload={
-                        "status": "needs_user_selection",
-                        "queries": research.queries,
-                        "sources": [source.model_dump() for source in research.sources],
-                        "assumptions": [
-                            *research.assumptions,
-                            "Select papers to download and index before using them as assignment evidence.",
-                        ],
-                    },
-                )
-            )
-            if research.sources:
-                next_actions.append("Select ArXiv papers to download, parse, and index into RAG.")
-            trace_events.append(
-                {
-                    "name": "assignment.arxiv_candidates_ready",
-                    "payload": {"queries": len(research.queries), "sources": len(research.sources)},
-                }
-            )
-        except Exception as exc:
-            next_actions.append("ArXiv candidate search failed; run research search manually or retry later.")
-            trace_events.append(
-                {
-                    "name": "assignment.arxiv_candidates_failed",
-                    "payload": {"error": str(exc)},
-                }
-            )
+        tool_batch = await context.run_tools({"analysis": result.analysis.model_dump(mode="json")})
+        research_artifact, source_count = _research_artifact_from_tool_batch(tool_batch)
+        if research_artifact is not None:
+            artifacts.append(research_artifact)
+        if source_count:
+            next_actions.append("Select research sources to download, parse, and index into RAG.")
+        trace_events.extend(_tool_trace_events(tool_batch))
+        trace_events.append(
+            {
+                "name": "assignment.research_candidates_ready",
+                "payload": {"sources": source_count},
+            }
+        )
         return WorkerRunResult(
-            final_response="已完成作业要求分析，并生成 ArXiv 论文候选；请选择需要下载并进入 RAG 的论文。",
+            final_response=(
+                "已完成作业要求分析，并生成研究资料候选；请选择需要下载并进入 RAG 的资料。"
+                if source_count
+                else "已完成作业要求分析；当前没有获得可用的研究资料候选。"
+            ),
             artifacts=artifacts,
+            missing_information=tool_batch.missing_information,
             next_actions=next_actions,
             trace_events=trace_events,
         )
@@ -678,7 +701,7 @@ class NoticeActionWorker:
         input_key="notice",
         input_schema="NoticeParseRequest",
         output_artifact_kind="notice_parse",
-        required_tools=["reminder.draft", "calendar.event.draft"],
+        allowed_tools=["reminder.draft", "calendar.event.draft"],
         memory_namespaces=["planner", "email", "finance"],
     )
 
@@ -694,6 +717,9 @@ class NoticeActionWorker:
 
         artifacts = [AgentArtifact(name="Notice Actions", kind="notice_parse", payload=parsed.model_dump())]
         trace_events = [{"name": "worker.completed", "payload": {"agent": "notice_action", "items": len(parsed.action_items)}}]
+        tool_context: dict[str, Any] = {
+            "action_items": [item.model_dump(mode="json") for item in parsed.action_items]
+        }
 
         if parsed.action_items:
             plan = await TaskPlannerService().plan_global(
@@ -705,6 +731,7 @@ class NoticeActionWorker:
                 )
             )
             artifacts.append(AgentArtifact(name="Global Plan", kind="planner_output", payload=plan.model_dump()))
+            tool_context.update(plan.model_dump(mode="json"))
             trace_events.append(
                 {
                     "name": "worker.completed",
@@ -712,10 +739,14 @@ class NoticeActionWorker:
                 }
             )
 
+        tool_batch = await context.run_tools(tool_context)
+        artifacts.extend(_tool_result_artifacts(tool_batch))
+        trace_events.extend(_tool_trace_events(tool_batch))
+
         return WorkerRunResult(
             final_response=f"已从通知中识别出 {len(parsed.action_items)} 个待办/事件，并生成了初步计划。",
             artifacts=artifacts,
-            missing_information=parsed.missing_information,
+            missing_information=list(dict.fromkeys([*parsed.missing_information, *tool_batch.missing_information])),
             trace_events=trace_events,
         )
 
@@ -814,6 +845,99 @@ class SystemCommandWorker:
             final_response="我不会执行覆盖系统指令、越权或破坏性命令；请描述你希望安全完成的实际任务。",
             trace_events=[{"name": "orchestrator.system_command_rejected", "payload": {}}],
         )
+
+
+def _tool_trace_events(batch: ToolExecutionBatch) -> list[dict[str, Any]]:
+    events = [
+        {
+            "name": "tool.decision",
+            "payload": {
+                "round": index,
+                "action": decision.action,
+                "reason": decision.reason,
+                "tool_names": [call.tool_name for call in decision.tool_calls],
+                "missing_information": decision.missing_information,
+            },
+        }
+        for index, decision in enumerate(batch.decisions, start=1)
+    ]
+    for result in batch.results:
+        events.append(
+            {
+                "name": "tool.executed",
+                "payload": {
+                    "tool_name": result.tool_name,
+                    "call_id": result.call_id,
+                    "success": result.success,
+                    "attempts": result.attempts,
+                    "degraded": result.degraded,
+                    "cached": result.cached,
+                    "error_type": result.error_type,
+                },
+            }
+        )
+    return events
+
+
+def _tool_result_artifacts(batch: ToolExecutionBatch) -> list[AgentArtifact]:
+    drafts = [
+        {
+            "call_id": result.call_id,
+            "tool_name": result.tool_name,
+            "output": result.output,
+        }
+        for result in batch.results
+        if result.success and result.tool_name in {"reminder.draft", "calendar.event.draft"}
+    ]
+    if not drafts:
+        return []
+    return [AgentArtifact(name="Tool Drafts", kind="tool_drafts", payload={"drafts": drafts})]
+
+
+def _research_artifact_from_tool_batch(
+    batch: ToolExecutionBatch,
+) -> tuple[AgentArtifact | None, int]:
+    queries: list[str] = []
+    sources: list[dict[str, Any]] = []
+    assumptions = ["Select sources before downloading or indexing them into RAG."]
+    for result in batch.results:
+        if not result.success:
+            assumptions.append(f"{result.tool_name} failed: {result.error}")
+            continue
+        if result.output.get("query"):
+            queries.append(str(result.output["query"]))
+        if result.tool_name in {"research.arxiv.search", "research.web.search"}:
+            sources.extend(item for item in result.output.get("sources", []) if isinstance(item, dict))
+            assumptions.extend(str(item) for item in result.output.get("assumptions", []))
+        elif result.tool_name == "browser.mcp.search_extract":
+            sources.extend(
+                {
+                    "source_type": "web",
+                    "title": item.get("title") or "Browser result",
+                    "url": item.get("url") or "",
+                    "summary": item.get("text"),
+                    "metadata": item.get("metadata") or {},
+                }
+                for item in result.output.get("results", [])
+                if isinstance(item, dict) and item.get("url")
+            )
+    deduped: dict[str, dict[str, Any]] = {}
+    for source in sources:
+        key = str(source.get("url") or source.get("title") or len(deduped))
+        deduped[key] = source
+    if not batch.results:
+        return None, 0
+    artifact = AgentArtifact(
+        name="Research Source Candidates",
+        kind="research_source_candidates",
+        payload={
+            "status": "needs_user_selection",
+            "queries": list(dict.fromkeys(queries)),
+            "sources": list(deduped.values()),
+            "assumptions": list(dict.fromkeys(assumptions)),
+        },
+    )
+    return artifact, len(deduped)
 
 
 def build_default_workers() -> list[WorkerAgent]:
